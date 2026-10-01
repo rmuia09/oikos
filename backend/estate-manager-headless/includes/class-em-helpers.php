@@ -258,6 +258,67 @@ class EM_Helpers {
 		return preg_replace( '/[^0-9+]/', '', (string) $phone );
 	}
 
+	/**
+	 * The country code assumed for numbers typed without one. Defaults to
+	 * Kenya (254) but is a setting + filter, so adding another market is a
+	 * config change rather than a code change.
+	 */
+	public static function default_country_code() {
+		$cc = (string) apply_filters(
+			'em_default_country_code',
+			EM_Settings::get( 'phone_country_code', '254' )
+		);
+		$cc = preg_replace( '/\D/', '', $cc );
+		return '' !== $cc ? $cc : '254';
+	}
+
+	/**
+	 * Normalise a phone number to E.164 (+254712345678), which is what SMS
+	 * gateways expect.
+	 *
+	 * Accepts a local number (0712 345 678, 712345678), one already carrying
+	 * the country code (254712345678) or a full international one
+	 * (+254712345678 / +447700900123). Returns '' when it can't be salvaged.
+	 *
+	 * @param string      $phone        Raw input.
+	 * @param string|null $country_code Override the default country code.
+	 */
+	public static function normalize_phone( $phone, $country_code = null ) {
+		$raw = trim( (string) $phone );
+		if ( '' === $raw ) {
+			return '';
+		}
+
+		$explicit_plus = ( 0 === strpos( ltrim( $raw ), '+' ) );
+		$digits        = preg_replace( '/\D/', '', $raw );
+		if ( '' === $digits ) {
+			return '';
+		}
+
+		$cc = ( null === $country_code )
+			? self::default_country_code()
+			: preg_replace( '/\D/', '', (string) $country_code );
+
+		/* A leading 0 is a national trunk prefix and never part of E.164. */
+		if ( 0 === strpos( $digits, '0' ) ) {
+			$digits = ltrim( $digits, '0' );
+		}
+
+		/* Only prepend the country code when it isn't already there. */
+		if ( ! $explicit_plus && '' !== $cc ) {
+			$already_has_cc = ( 0 === strpos( $digits, $cc ) && strlen( $digits ) > strlen( $cc ) + 6 );
+			if ( ! $already_has_cc ) {
+				$digits = $cc . $digits;
+			}
+		}
+
+		/* E.164 allows 8–15 digits including the country code. */
+		if ( strlen( $digits ) < 8 || strlen( $digits ) > 15 ) {
+			return '';
+		}
+		return '+' . $digits;
+	}
+
 	public static function clean_email( $email ) {
 		return sanitize_email( $email );
 	}

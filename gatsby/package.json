@@ -1,0 +1,21 @@
+{
+  "name": "estate-manager-gatsby",
+  "private": true,
+  "description": "Oikos — household and estate management, Gatsby front-end backed by WordPress",
+  "version": "1.0.0",
+  "scripts": {
+    "develop": "gatsby develop",
+    "build": "gatsby build",
+    "serve": "gatsby serve",
+    "clean": "gatsby clean",
+    "test:os": "node src/client/os/wm-core.test.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "gatsby": "^5.13.7",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}

@@ -39,9 +39,14 @@ class EM_Reports {
 			JOIN " . EM_DB::table( 'tenants' ) . " t ON t.id = l.tenant_id
 			WHERE l.status = 'active' AND l.end_date <= DATE_ADD(DATE(%s), INTERVAL 60 DAY)
 			ORDER BY l.end_date ASC", current_time( 'Y-m-d' ) ), ARRAY_A );
-		foreach ( (array) $expiring as &$e ) {
+		/* Cast first, then iterate by reference. Casting inside the foreach
+		   iterates a temporary copy, so the days_left write was discarded and
+		   the dashboard rendered "undefinedd left". */
+		$expiring = (array) $expiring;
+		foreach ( $expiring as &$e ) {
 			$e['days_left'] = EM_Helpers::days_left( $e['end_date'] );
 		}
+		unset( $e );
 
 		return array(
 			'total_units'        => $total_units,

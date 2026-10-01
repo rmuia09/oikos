@@ -25,6 +25,18 @@ class EM_API {
 			'callback'            => array( __CLASS__, 'auth_login' ),
 			'permission_callback' => '__return_true',
 		) );
+		/* Both reset endpoints are public but rate limited, and neither reveals
+		   whether an account exists. */
+		register_rest_route( self::NS, '/auth/forgot-password', array(
+			'methods'             => 'POST',
+			'callback'            => array( __CLASS__, 'auth_forgot_password' ),
+			'permission_callback' => '__return_true',
+		) );
+		register_rest_route( self::NS, '/auth/reset-password', array(
+			'methods'             => 'POST',
+			'callback'            => array( __CLASS__, 'auth_reset_password' ),
+			'permission_callback' => '__return_true',
+		) );
 		register_rest_route( self::NS, '/auth/me', array(
 			'methods'             => 'GET',
 			'callback'            => array( __CLASS__, 'auth_me' ),
@@ -93,7 +105,7 @@ class EM_API {
 		self::route( '/reminders/run', 'POST', 'reminders_run', $std );
 		self::route( '/integrations/test', 'POST', 'integrations_test', $std );
 
-		/* ---------- Activity ---------- */
+		/* ---------- Activity / audit trail ---------- */
 		self::route( '/activity', 'GET', 'activity', $std );
 
 		/* ---------- Settings ---------- */
@@ -154,15 +166,466 @@ class EM_API {
 		if ( ! $username || ! $password ) {
 			return self::err( 'Username and password are required.', 401 );
 		}
+
+		/* An Application Password is the intended credential. If that fails,
+		   fall back to the account password so ordinary users are not locked
+		   out for not knowing to generate one — but exchange it for a fresh
+		   Application Password so the returned token is still revocable. */
 		$user = wp_authenticate_application_password( null, $username, $password );
+
+		$minted = null;
 		if ( ! $user instanceof WP_User || is_wp_error( $user ) ) {
-			return self::err( 'Invalid username or application password.', 401 );
+			$user = wp_authenticate( $username, $password );
+			if ( $user instanceof WP_User && ! is_wp_error( $user ) ) {
+				if ( ! self::password_login_allowed() ) {
+					return self::err( 'Invalid username or application password.', 401 );
+				}
+				$issued = self::issue_application_password( $user );
+				if ( is_wp_error( $issued ) ) {
+					return $issued;
+				}
+				$minted   = $issued['password'];
+				$password = $issued['password'];
+			}
+		}
+
+		if ( ! $user instanceof WP_User || is_wp_error( $user ) ) {
+			return self::err( 'Invalid username or password.', 401 );
 		}
 		if ( get_user_meta( $user->ID, 'em_disabled', true ) ) {
 			return self::err( 'This account is disabled.', 403 );
 		}
 		$token = base64_encode( $username . ':' . $password );
-		return array( 'token' => $token, 'user' => self::user_short( $user ) );
+
+		/* Authenticate the request as this user before logging, so the audit
+		   row records who signed in rather than 'system'. */
+		wp_set_current_user( $user->ID );
+		EM_DB::log(
+			'login',
+			'user',
+			$user->ID,
+			$minted ? 'Signed in with account password' : 'Signed in with application password',
+			$user->user_login
+		);
+
+		return array(
+			'token' => $token,
+			'user'  => self::user_short( $user ),
+			/* Tells the client we minted a throwaway credential, so it can
+			   nudge the user toward using an Application Password next time. */
+			'issued_application_password' => (bool) $minted,
+		);
+	}
+
+	/**
+	 * Account-password logins are permitted unless explicitly disabled.
+	 * Filter `em_allow_password_login` to return false to force
+	 * Application Passwords only (recommended for a public deployment).
+	 */
+	private static function password_login_allowed() {
+		return (bool) apply_filters( 'em_allow_password_login', true );
+	}
+
+	/** Mint a single-use Application Password and return its plaintext value. */
+	private static function issue_application_password( WP_User $user ) {
+		if ( ! class_exists( 'WP_Application_Passwords' ) ) {
+			return self::err( 'Application passwords are not available.', 500 );
+		}
+		$created = WP_Application_Passwords::create_new_application_password(
+			$user->ID,
+			array( 'name' => 'Oikos sign-in' )
+		);
+		if ( is_wp_error( $created ) ) {
+			return self::err( 'Could not start a session for you. Please contact an administrator.', 500 );
+		}
+		return array(
+			'password' => $created[0],
+			'item'     => $created[1],
+		);
+	}
+
+	/* ---------------- Password reset ---------------- */
+
+	/** Throttle repeated attempts from one caller. */
+	private static function rate_limit( $bucket, $seconds = 300, $max = 5 ) {
+		$ip    = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : 'unknown';
+		$key   = 'em_rl_' . md5( $bucket . '|' . $ip );
+		$count = (int) get_transient( $key );
+		if ( $count >= $max ) {
+			return false;
+		}
+		set_transient( $key, $count + 1, $seconds );
+		return true;
+	}
+
+	/**
+	 * Start a password reset. Always returns the same neutral response so the
+	 * endpoint can't be used to discover which accounts exist.
+	 */
+	public static function auth_forgot_password( WP_REST_Request $r ) {
+		$identifier = trim( (string) $r->get_param( 'identifier' ) );
+		$neutral    = array(
+			'ok'      => true,
+			'channel' => 'sms',
+			'message' => 'If that account exists, a reset code is on its way.',
+		);
+
+		if ( '' === $identifier ) {
+			return self::err( 'Enter your username, phone number or email address.', 400 );
+		}
+		if ( ! self::rate_limit( 'forgot', 300, 5 ) ) {
+			return self::err( 'Too many reset requests. Please wait a few minutes and try again.', 429 );
+		}
+
+		$user = self::find_user_by_identifier( $identifier );
+		if ( ! $user ) {
+			return $neutral;
+		}
+
+		/* A reset request is itself auditable, and worth knowing about even
+		   though the response says nothing about whether it succeeded. */
+		EM_DB::log(
+			'reset_requested',
+			'user',
+			$user->ID,
+			'Password reset requested',
+			$user->user_login,
+			$user
+		);
+
+		$phone = (string) get_user_meta( $user->ID, 'em_phone', true );
+
+		/* SMS first: this user base is phone-first and several accounts have no
+		   email at all. Only fall back to an emailed link when there is no
+		   phone number on file. */
+		if ( '' !== $phone ) {
+			$code = self::generate_reset_code( $user );
+			$sent = EM_Notify::send_sms(
+				$phone,
+				'Your Oikos password reset code is ' . $code .
+				'. It expires in 10 minutes. If you did not request this, ignore this message.'
+			);
+			if ( empty( $sent['ok'] ) || ! empty( $sent['simulated'] ) ) {
+				EM_DB::log(
+					'reset_sms_undelivered',
+					'user',
+					$user->ID,
+					! empty( $sent['simulated'] )
+						? "Reset SMS not sent — SMS is disabled or Africa's Talking is unconfigured"
+						: 'Reset SMS failed: ' . ( $sent['error'] ?? 'unknown error' ),
+					$user->user_login,
+					$user
+				);
+			}
+			/* No SMS gateway locally, so expose the code to keep the flow
+			   testable. Never active outside a local environment. */
+			if ( self::is_local_env() ) {
+				$neutral['dev_code']  = $code;
+				$neutral['dev_phone'] = $phone;
+			}
+			return $neutral;
+		}
+
+		/* No phone number — fall back to an emailed link. */
+		$neutral['channel'] = 'email';
+		$neutral['message'] = 'If that account exists, a reset link is on its way.';
+
+		if ( ! $user->user_email ) {
+			/* Neither channel exists, so the reset can never arrive. Record it
+			   rather than fail silently. */
+			EM_DB::log(
+				'reset_undelivered',
+				'user',
+				$user->ID,
+				'Reset not sent — this account has neither a phone number nor an email address',
+				$user->user_login,
+				$user
+			);
+			return $neutral;
+		}
+
+		$key = get_password_reset_key( $user );
+		if ( is_wp_error( $key ) ) {
+			return $neutral;
+		}
+
+		$link = add_query_arg(
+			array(
+				'reset' => $key,
+				'login' => rawurlencode( $user->user_login ),
+			),
+			self::app_base_url() . '/app'
+		);
+
+		$sent = EM_Notify::send_email(
+			$user->user_email,
+			'Reset your Oikos password',
+			self::reset_email_body( $user, $link )
+		);
+		if ( empty( $sent['ok'] ) || ! empty( $sent['simulated'] ) ) {
+			EM_DB::log(
+				'reset_email_undelivered',
+				'user',
+				$user->ID,
+				! empty( $sent['simulated'] )
+					? 'Reset email not sent — email is disabled or SMTP is unconfigured'
+					: 'Reset email failed: ' . ( $sent['error'] ?? 'unknown error' ),
+				$user->user_login,
+				$user
+			);
+		}
+
+		if ( self::is_local_env() ) {
+			$neutral['dev_reset_link'] = $link;
+		}
+
+		return $neutral;
+	}
+
+	/** Find a login account by username, email address, or phone number. */
+	private static function find_user_by_identifier( $identifier ) {
+		$identifier = trim( (string) $identifier );
+		if ( '' === $identifier ) {
+			return null;
+		}
+
+		if ( is_email( $identifier ) ) {
+			$user = get_user_by( 'email', $identifier );
+			if ( $user ) {
+				return $user;
+			}
+		}
+
+		$user = get_user_by( 'login', $identifier );
+		if ( $user ) {
+			return $user;
+		}
+
+		/* Anything that normalises to a Kenyan number is looked up as a phone. */
+		$phone = EM_Helpers::normalize_phone( $identifier );
+		if ( '' !== $phone ) {
+			$found = get_users( array(
+				'meta_key'   => 'em_phone',
+				'meta_value' => $phone,
+				'number'     => 1,
+			) );
+			if ( ! empty( $found ) ) {
+				return $found[0];
+			}
+		}
+
+		return null;
+	}
+
+	/** Generate a 6-digit code, store it hashed with an expiry, return the code. */
+	private static function generate_reset_code( WP_User $user ) {
+		$code = str_pad( (string) random_int( 0, 999999 ), 6, '0', STR_PAD_LEFT );
+		update_user_meta( $user->ID, 'em_reset_code', wp_hash_password( $code ) );
+		update_user_meta( $user->ID, 'em_reset_code_expires', time() + 10 * MINUTE_IN_SECONDS );
+		update_user_meta( $user->ID, 'em_reset_code_attempts', 0 );
+		return $code;
+	}
+
+	private static function clear_reset_code( $user_id ) {
+		delete_user_meta( $user_id, 'em_reset_code' );
+		delete_user_meta( $user_id, 'em_reset_code_expires' );
+		delete_user_meta( $user_id, 'em_reset_code_attempts' );
+	}
+
+	/** Validate a submitted SMS code. Returns true, or a WP_Error. */
+	private static function check_reset_code( WP_User $user, $code ) {
+		$attempts = (int) get_user_meta( $user->ID, 'em_reset_code_attempts', true );
+		if ( $attempts >= 5 ) {
+			self::clear_reset_code( $user->ID );
+			return self::err( 'Too many incorrect codes. Please request a new one.', 429 );
+		}
+
+		$expires = (int) get_user_meta( $user->ID, 'em_reset_code_expires', true );
+		if ( $expires < time() ) {
+			self::clear_reset_code( $user->ID );
+			return self::err( 'That code has expired. Please request a new one.', 400 );
+		}
+
+		$hash = (string) get_user_meta( $user->ID, 'em_reset_code', true );
+		if ( '' === $hash || ! wp_check_password( $code, $hash ) ) {
+			update_user_meta( $user->ID, 'em_reset_code_attempts', $attempts + 1 );
+			return self::err( 'That code is not correct.', 400 );
+		}
+		return true;
+	}
+
+	/**
+	 * Consume a reset credential and set a new password.
+	 *
+	 * Two paths share this endpoint:
+	 *   - SMS:  { identifier, code, password }
+	 *   - link: { reset_key, login, password }
+	 */
+	public static function auth_reset_password( WP_REST_Request $r ) {
+		$password = (string) $r->get_param( 'password' );
+
+		$problem = self::validate_new_password( $password );
+		if ( $problem ) {
+			return self::err( $problem, 400 );
+		}
+		if ( ! self::rate_limit( 'reset', 900, 10 ) ) {
+			return self::err( 'Too many attempts. Please request a new code.', 429 );
+		}
+
+		$code       = trim( (string) $r->get_param( 'code' ) );
+		$identifier = trim( (string) $r->get_param( 'identifier' ) );
+		$key        = trim( (string) $r->get_param( 'reset_key' ) );
+		$login      = sanitize_user( (string) $r->get_param( 'login' ) );
+
+		/* ---- SMS code path ---- */
+		if ( '' !== $code ) {
+			if ( '' === $identifier ) {
+				return self::err( 'Enter the username or phone number you requested the code for.', 400 );
+			}
+			$user = self::find_user_by_identifier( $identifier );
+			if ( ! $user ) {
+				return self::err( 'That code is not correct, or it has expired. Request a new one.', 400 );
+			}
+			$valid = self::check_reset_code( $user, $code );
+			if ( is_wp_error( $valid ) ) {
+				return $valid;
+			}
+			return self::complete_password_reset( $user, $password, 'Reset password with SMS code' );
+		}
+
+		/* ---- emailed-link path ---- */
+		if ( '' === $key || '' === $login ) {
+			return self::err( 'This reset link is incomplete. Please request a new one.', 400 );
+		}
+		$user = get_user_by( 'login', $login );
+		if ( ! $user ) {
+			return self::err( 'This reset link is no longer valid. Please request a new one.', 400 );
+		}
+		/* Pass the login string, not the WP_User object — core rejects anything
+		   that isn't a string with an 'invalid_key' error. */
+		if ( check_password_reset_key( $key, $user->user_login ) instanceof WP_Error ) {
+			return self::err( 'This reset link has expired or was already used. Please request a new one.', 400 );
+		}
+		return self::complete_password_reset( $user, $password, 'Reset password via emailed link', $key );
+	}
+
+	/** Apply the new password and everything that must follow it. */
+	private static function complete_password_reset( WP_User $user, $password, $reason, $key = null ) {
+		wp_set_password( $password, $user->ID );
+		wp_clear_auth_cookie();
+
+		/* A reset must invalidate every existing credential, including any
+		   Application Passwords still in circulation. */
+		WP_Application_Passwords::delete_all_application_passwords( $user->ID );
+		self::clear_reset_code( $user->ID );
+
+		do_action( 'password_reset', $user, $key );
+		EM_DB::log( 'password', 'user', $user->ID, $reason, $user->user_login, $user );
+
+		/* Hand back a working session so the user isn't dumped back to a
+		   login form they now know the password for. */
+		$issued = self::issue_application_password( $user );
+		if ( is_wp_error( $issued ) ) {
+			return array( 'ok' => true, 'message' => 'Your password has been changed. You can now sign in.' );
+		}
+		return array(
+			'ok'      => true,
+			'message' => 'Your password has been changed.',
+			'token'   => base64_encode( $user->user_login . ':' . $issued['password'] ),
+			'user'    => self::user_short( $user ),
+		);
+	}
+
+	/** Shared password policy. Returns an error message, or null when valid. */
+	private static function validate_new_password( $password ) {
+		$problem = self::validate_password_strength( $password );
+		if ( $problem ) {
+			return $problem;
+		}
+		if ( self::password_is_common( $password ) ) {
+			return 'That password is too common. Please choose something harder to guess.';
+		}
+		return null;
+	}
+
+	/** Where the Gatsby app lives, so emailed links land somewhere real. */
+	private static function app_base_url() {
+		/* Setting first, then the legacy WP option, then WordPress' own URL.
+		   The last fallback is wrong for a headless deploy, so the setting
+		   exists and is surfaced in the UI. */
+		$configured = trim( (string) EM_Settings::get( 'em_app_url', '' ) );
+		if ( ! $configured ) {
+			$configured = trim( (string) get_option( 'em_app_url', '' ) );
+		}
+		if ( $configured ) {
+			return untrailingslashit( $configured );
+		}
+		return untrailingslashit( get_home_url() );
+	}
+
+	private static function is_local_env() {
+		return 'local' === (string) getenv( 'WP_ENVIRONMENT_TYPE' )
+			|| 'local' === (string) wp_get_environment_type();
+	}
+
+	private static function reset_email_body( WP_User $user, $link ) {
+		$name = $user->display_name ? $user->display_name : $user->user_login;
+		return "Hello {$name},\n\n"
+			. "Someone requested a password reset for your Oikos account.\n\n"
+			. "Choose a new password here:\n{$link}\n\n"
+			. "This link expires in 24 hours. If you did not request it, you can ignore this email — "
+			. "your password will not change.\n";
+	}
+
+	/* ---------------- Shared password policy ---------------- */
+
+	/**
+	 * The one place password strength is defined. Every path that sets a
+	 * password goes through here: signup, admin create, self-service change,
+	 * and reset — so the rules can never drift apart.
+	 *
+	 * @return string|null An error message, or null when the password is fine.
+	 */
+	public static function validate_password_strength( $password, $min = 8 ) {
+		$password = (string) $password;
+		$fail     = array();
+
+		if ( strlen( $password ) < $min ) {
+			$fail[] = "at least {$min} characters";
+		}
+		if ( strlen( $password ) > 200 ) {
+			$fail[] = 'no more than 200 characters';
+		}
+		if ( ! preg_match( '/[a-z]/', $password ) ) {
+			$fail[] = 'a lowercase letter';
+		}
+		if ( ! preg_match( '/[A-Z]/', $password ) ) {
+			$fail[] = 'an uppercase letter';
+		}
+		if ( ! preg_match( '/[0-9]/', $password ) ) {
+			$fail[] = 'a number';
+		}
+		if ( preg_match( '/\s$/', $password ) ) {
+			$fail[] = 'no trailing space';
+		}
+
+		if ( $fail ) {
+			/* Readable as a sentence rather than a rule dump. */
+			$list   = implode( ', ', $fail );
+			$list   = 'a' === substr( $list, 0, 1 ) ? $list : 'a ' . $list;
+			return 'Password must contain ' . $list . '.';
+		}
+		return null;
+	}
+
+	/** Common-password denylist. Cheap defence against the obvious choices. */
+	private static function password_is_common( $password ) {
+		$weak = array(
+			'password', 'password1', 'password123', '12345678', '123456789',
+			'qwerty123', 'letmein1', 'welcome1', 'admin123', 'iloveyou1',
+			'passw0rd', 'abc12345', 'changeme', 'estate123', 'property1',
+		);
+		return in_array( strtolower( trim( $password ) ), $weak, true );
 	}
 
 	public static function auth_me() {
@@ -180,11 +643,18 @@ class EM_API {
 		$user  = wp_get_current_user();
 		$cur   = (string) $r->get_param( 'current_password' );
 		$new   = (string) $r->get_param( 'new_password' );
-		if ( ! $cur || strlen( $new ) < 6 ) {
-			return self::err( 'New password must be at least 6 characters.' );
+		if ( ! $cur ) {
+			return self::err( 'Your current password is required.', 400 );
+		}
+		$problem = self::validate_new_password( $new );
+		if ( $problem ) {
+			return self::err( $problem, 400 );
 		}
 		if ( ! wp_check_password( $cur, $user->user_pass, $user->ID ) ) {
 			return self::err( 'Current password is incorrect.', 403 );
+		}
+		if ( wp_check_password( $new, $user->user_pass, $user->ID ) ) {
+			return self::err( 'Please choose a password different from your current one.', 400 );
 		}
 		wp_set_password( $new, $user->ID );
 		EM_DB::log( 'password', 'user', $user->ID, 'Changed own password', $user->user_login );
@@ -198,6 +668,7 @@ class EM_API {
 			'username'    => $u->user_login,
 			'full_name'   => $u->display_name,
 			'email'       => $u->user_email,
+			'phone'       => (string) get_user_meta( $u->ID, 'em_phone', true ),
 			'role'        => $is_admin ? 'admin' : 'manager',
 			'created_at'  => mysql2date( 'Y-m-d', $u->user_registered ),
 			'permissions' => array(
@@ -568,10 +1039,13 @@ class EM_API {
 			JOIN " . EM_DB::table( 'tenants' ) . " t ON t.id = l.tenant_id
 			WHERE l.status = 'active'
 			ORDER BY l.end_date ASC", ARRAY_A );
-		foreach ( (array) $rows as &$l ) {
+		/* Cast before iterating by reference — see dashboard_stats(). */
+		$rows = (array) $rows;
+		foreach ( $rows as &$l ) {
 			$l['days_left']     = EM_Helpers::days_left( $l['end_date'] );
 			$l['new_rent_10pct'] = round( (float) $l['monthly_rent'] * 1.1, 2 );
 		}
+		unset( $l );
 		return $rows;
 	}
 
@@ -951,14 +1425,52 @@ class EM_API {
 
 	/* ---------------- Activity ---------------- */
 
+	/**
+	 * Read the audit trail, with optional filtering.
+	 *
+	 * The audit table is append-only: every write happens through EM_DB::log()
+	 * at the point of the change, and nothing in the API can edit or remove a
+	 * row. Filters exist so a reviewer can narrow a long log without exporting.
+	 */
 	public static function activity( WP_REST_Request $r ) {
 		global $wpdb;
-		$limit = (int) $r->get_param( 'limit', 400 );
-		$limit = min( 1000, max( 1, $limit ) );
-		return $wpdb->get_results( $wpdb->prepare(
-			'SELECT * FROM ' . EM_DB::table( 'audit_log' ) . ' ORDER BY id DESC LIMIT %d',
-			$limit
-		), ARRAY_A );
+
+		$limit  = min( 1000, max( 1, (int) $r->get_param( 'limit', 400 ) ) );
+		$table  = EM_DB::table( 'audit_log' );
+		$where  = array( '1=1' );
+		$params = array();
+
+		$user_param = trim( (string) $r->get_param( 'user', '' ) );
+		if ( $user_param ) {
+			$where[]  = '(username = %s OR user_id = %s)';
+			$params[] = $user_param;
+			$params[] = is_numeric( $user_param ) ? (int) $user_param : 0;
+		}
+
+		$entity = trim( (string) $r->get_param( 'entity', '' ) );
+		if ( $entity ) {
+			$where[]  = 'entity_type = %s';
+			$params[] = $entity;
+		}
+
+		$action = trim( (string) $r->get_param( 'action', '' ) );
+		if ( $action ) {
+			$where[]  = 'action = %s';
+			$params[] = $action;
+		}
+
+		$search = trim( (string) $r->get_param( 'search', '' ) );
+		if ( $search ) {
+			$like     = '%' . $wpdb->esc_like( $search ) . '%';
+			$where[]  = '(reason LIKE %s OR details LIKE %s)';
+			$params[] = $like;
+			$params[] = $like;
+		}
+
+		$sql = "SELECT * FROM {$table} WHERE " . implode( ' AND ', $where ) . ' ORDER BY id DESC LIMIT %d';
+		$params[] = $limit;
+
+		return $wpdb->get_results( $wpdb->prepare( $sql, $params ), ARRAY_A );
 	}
 
 	/* ---------------- Settings ---------------- */
@@ -966,6 +1478,7 @@ class EM_API {
 	public static function settings_get() {
 		return array(
 			'renewal_reminder_months' => (int) EM_Settings::get( 'renewal_reminder_months', 2 ),
+			'phone_country_code'      => (string) EM_Settings::get( 'phone_country_code', '254' ),
 			'rates'                   => EM_Settings::utility_rates(),
 			'sms'                     => EM_Settings::masked( 'sms' ),
 			'email'                   => EM_Settings::masked( 'email' ),
@@ -976,6 +1489,11 @@ class EM_API {
 		$json = self::body( $r );
 
 		EM_Settings::set( 'renewal_reminder_months', max( 1, (int) ( $json['renewal_reminder_months'] ?? 2 ) ) );
+
+		if ( isset( $json['phone_country_code'] ) ) {
+			$cc = preg_replace( '/\D/', '', (string) $json['phone_country_code'] );
+			EM_Settings::set( 'phone_country_code', '' !== $cc ? $cc : '254' );
+		}
 
 		if ( isset( $json['rates'] ) && is_array( $json['rates'] ) ) {
 			EM_Settings::set( 'water', max( 0, (float) ( $json['rates']['water'] ?? 0 ) ) );
@@ -1002,6 +1520,9 @@ class EM_API {
 			EM_Settings::set( 'email_from', (string) ( $em['from'] ?? '' ) );
 			if ( ! empty( $em['pass'] ) ) {
 				EM_Settings::set( 'email_pass', (string) $em['pass'] );
+			}
+			if ( isset( $em['app_url'] ) ) {
+				EM_Settings::set( 'em_app_url', esc_url_raw( trim( (string) $em['app_url'] ) ) );
 			}
 		}
 
@@ -1040,12 +1561,21 @@ class EM_API {
 		$password = (string) $r->get_param( 'password' );
 		$full     = (string) $r->get_param( 'full_name' );
 		$role     = 'admin' === $r->get_param( 'role' ) ? 'admin' : 'manager';
-		if ( ! $username || strlen( $password ) < 6 ) {
-			return self::err( 'Username and a password of at least 6 characters are required.' );
+		if ( ! $username ) {
+			return self::err( 'A username is required.' );
+		}
+		$weak = self::validate_new_password( $password );
+		if ( $weak ) {
+			return self::err( $weak );
 		}
 		if ( username_exists( $username ) ) {
 			return self::err( 'That username is already taken.' );
 		}
+		$phone = self::validated_phone( (string) $r->get_param( 'phone' ) );
+		if ( is_wp_error( $phone ) ) {
+			return $phone;
+		}
+
 		$id = wp_insert_user( array(
 			'user_login'      => $username,
 			'user_pass'       => $password,
@@ -1055,10 +1585,37 @@ class EM_API {
 		if ( is_wp_error( $id ) ) {
 			return self::err( $id->get_error_message() );
 		}
+		if ( '' !== $phone ) {
+			update_user_meta( $id, 'em_phone', $phone );
+		}
 		$user = new WP_User( $id );
 		self::apply_role( $user, $role );
 		EM_DB::log( 'create_user', 'user', $id, 'Created user', $username . ' (' . $role . ')' );
 		return self::user_short( $user ) + array( 'active' => true );
+	}
+
+	/**
+	 * Validate and normalise a phone number for a user account. Returns the
+	 * normalised value ('' when blank), or a WP_Error when unusable.
+	 */
+	private static function validated_phone( $raw, $ignore_user_id = 0 ) {
+		$raw = trim( (string) $raw );
+		if ( '' === $raw ) {
+			return '';
+		}
+		$phone = EM_Helpers::normalize_phone( $raw );
+		if ( '' === $phone ) {
+			return self::err( 'That phone number doesn\'t look valid. Use 0712 345 678 or +254 712 345 678.' );
+		}
+		$existing = get_users( array(
+			'meta_key'   => 'em_phone',
+			'meta_value' => $phone,
+			'number'     => 1,
+		) );
+		if ( ! empty( $existing ) && (int) $existing[0]->ID !== (int) $ignore_user_id ) {
+			return self::err( 'Another user already uses that phone number.' );
+		}
+		return $phone;
 	}
 
 	public static function users_update( WP_REST_Request $r ) {
@@ -1072,12 +1629,34 @@ class EM_API {
 			$data['display_name'] = (string) $r->get_param( 'full_name' );
 		}
 		if ( $r->get_param( 'password' ) ) {
+			$weak = self::validate_new_password( (string) $r->get_param( 'password' ) );
+			if ( $weak ) {
+				return self::err( $weak );
+			}
 			$data['user_pass'] = (string) $r->get_param( 'password' );
+			/* An admin-set password also invalidates that user's existing
+			   Application Passwords, otherwise a reset wouldn't actually
+			   lock out a compromised session. */
+			$reset_creds = true;
 		}
-		if ( $data ) {
+		if ( count( $data ) > 1 ) {
 			$res = wp_update_user( $data );
 			if ( is_wp_error( $res ) ) {
 				return self::err( $res->get_error_message() );
+			}
+		}
+		if ( ! empty( $reset_creds ) && class_exists( 'WP_Application_Passwords' ) ) {
+			WP_Application_Passwords::delete_all_application_passwords( $id );
+		}
+		if ( $r->get_param( 'phone' ) !== null ) {
+			$phone = self::validated_phone( (string) $r->get_param( 'phone' ), $id );
+			if ( is_wp_error( $phone ) ) {
+				return $phone;
+			}
+			if ( '' === $phone ) {
+				delete_user_meta( $id, 'em_phone' );
+			} else {
+				update_user_meta( $id, 'em_phone', $phone );
 			}
 		}
 		if ( $r->get_param( 'role' ) !== null ) {
@@ -1108,6 +1687,10 @@ class EM_API {
 		if ( $id === get_current_user_id() ) {
 			return self::err( 'You cannot delete your own account.', 409 );
 		}
+		/* wp_delete_user() ships in wp-admin, which a REST request never loads. */
+		if ( ! function_exists( 'wp_delete_user' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/user.php';
+		}
 		wp_delete_user( $id );
 		EM_DB::log( 'delete_user', 'user', $id, $reason, $user->user_login );
 		return array( 'ok' => true );
@@ -1133,10 +1716,13 @@ class EM_API {
 		$by_path = $wpdb->get_results( "SELECT path, COUNT(*) AS views FROM {$t} GROUP BY path ORDER BY views DESC LIMIT 15", ARRAY_A );
 
 		$recent = $wpdb->get_results( "SELECT * FROM {$t} ORDER BY id DESC LIMIT 50", ARRAY_A );
-		foreach ( (array) $recent as &$v ) {
+		/* Cast before iterating by reference — see dashboard_stats(). */
+		$recent = (array) $recent;
+		foreach ( $recent as &$v ) {
 			list( $v['device'], $v['browser'] ) = EM_Helpers::classify_ua( (string) ( $v['user_agent'] ?? '' ) );
 			unset( $v['user_agent'] );
 		}
+		unset( $v );
 
 		return array(
 			'total'      => $total,

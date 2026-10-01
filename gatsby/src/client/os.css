@@ -1,0 +1,616 @@
+/* ============================================================
+   OS shell — window chrome, canvas, dock, launcher, explorer.
+   Same drafting register as styles.css: ink borders, hard
+   shadows, serif titles, mono labels, cobalt accent.
+   ============================================================ */
+
+.os {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  color: var(--ink);
+  overflow: hidden;
+}
+
+/* ---------- Menu bar ---------- */
+.os-menubar {
+  height: 46px;
+  min-height: 46px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  /* Generous horizontal padding so nothing sits against the screen edge. */
+  padding: 0 18px;
+  background: var(--ink);
+  color: #f4f2ea;
+  border-bottom: 2px solid var(--ink);
+  overflow: hidden;
+}
+.os-mark {
+  display: flex; align-items: center; gap: 7px;
+  background: transparent; border: 0; cursor: pointer;
+  color: #f4f2ea; font-family: var(--serif);
+  font-size: 14px; font-weight: 700; letter-spacing: -0.01em;
+  padding: 4px 6px; border-radius: 4px;
+}
+.os-mark:hover { background: #26251e; }
+/* Items get their own breathing room and never collapse into each other. */
+.os-menubar-items {
+  display: flex; align-items: center; gap: 4px;
+  flex-shrink: 1; min-width: 0; overflow-x: auto;
+  scrollbar-width: none;
+}
+.os-menubar-items::-webkit-scrollbar { display: none; }
+.os-menubar-items button {
+  background: transparent; border: 0; cursor: pointer;
+  color: #d8d6cb; font-size: 12.5px;
+  padding: 7px 11px; white-space: nowrap; flex-shrink: 0;
+  border-radius: 5px; font-family: var(--sans);
+}
+.os-menubar-items button:hover { background: #2f2d25; color: #fff; }
+.os-menubar-items button:focus-visible { outline: 2px solid #f4f2ea; outline-offset: -2px; }
+
+/* The brand must yield space before the actions do, so it truncates. */
+.os-mark { flex-shrink: 1; min-width: 0; overflow: hidden; }
+.os-mark .brand-word { white-space: nowrap; }
+
+.os-menubar-right {
+  margin-left: auto; display: flex; align-items: center; gap: 12px;
+  flex-shrink: 0; padding-left: 12px;
+}
+
+/* Window-wide actions. Always visible, never scrolled or clipped. */
+.os-window-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.os-window-action {
+  background: #33312a; color: #f4f2ea;
+  border: 1.5px solid #5c5a4e; border-radius: 6px;
+  padding: 6px 12px; font-family: var(--sans);
+  font-size: 11.5px; font-weight: 700; white-space: nowrap; cursor: pointer;
+}
+.os-window-action:hover:not(:disabled) { background: #3f3d33; border-color: #8b887a; }
+.os-window-action:focus-visible { outline: 2px solid #f4f2ea; outline-offset: 2px; }
+.os-window-action:disabled { opacity: 0.38; cursor: not-allowed; }
+.os-window-action--close { border-color: #8a5f54; color: #f3cdc4; }
+.os-window-action--close:hover:not(:disabled) {
+  background: #4a2a24; border-color: #c08a7c; color: #fff;
+}
+.os-clock {
+  font-family: var(--mono); font-size: 12px;
+  letter-spacing: 0.06em; color: #f4f2ea;
+}
+.os-menubar-right .btn {
+  background: #33312a; color: #f4f2ea; border-color: #5c5a4e;
+  box-shadow: none; padding: 6px 12px; font-size: 11.5px; font-weight: 600;
+}
+.os-menubar-right .btn:hover { background: #3f3d33; }
+.os-menubar-right .badge { color: #f4f2ea; }
+.os-menubar-right .badge.accent { background: #27307a; color: #cfd8ff; }
+.os-menubar-right .badge.neutral { background: #33312a; color: #d8d6cb; }
+
+/* ---------- Canvas ---------- */
+.os-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background-image:
+    linear-gradient(rgba(23, 22, 15, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(23, 22, 15, 0.05) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+
+.os-snap-preview {
+  position: absolute;
+  border: 2px dashed var(--blue);
+  background: rgba(31, 71, 216, 0.12);
+  border-radius: var(--radius);
+  pointer-events: none;
+  z-index: 5;
+  transition: all 0.09s ease-out;
+}
+
+/* Faint engraved emblem in the canvas whitespace. Behind the shortcut icons
+   (z 1) and the welcome card (z 2), so it only reads as wallpaper. */
+.os-watermark {
+  position: absolute;
+  right: 4%;
+  bottom: 5%;
+  width: min(32vw, 380px);
+  color: var(--blue);
+  opacity: 0.08;
+  pointer-events: none;
+  user-select: none;
+  z-index: 0;
+}
+.os-watermark svg { display: block; width: 100%; height: auto; }
+
+/* Full-canvas centring layer. It must not swallow clicks meant for the
+   desktop icons underneath, so only the card itself is interactive. */
+.os-welcome {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 24px;
+  pointer-events: none;
+  z-index: 2;
+}
+.os-welcome-card {
+  pointer-events: auto;
+  width: min(680px, 100%);
+  padding: 44px 48px 38px;
+  background: var(--paper);
+  border: 2px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 9px 9px 0 rgba(23, 22, 15, 0.16);
+}
+.os-welcome h1 {
+  font-family: var(--serif); font-size: 58px;
+  letter-spacing: -0.035em; line-height: 1.02;
+  margin: 0;
+}
+/* The brand logotype uses the calligraphic face, which needs more size and
+   tighter leading than a serif to sit on the same baseline. */
+.os-welcome .os-welcome-logo {
+  font-family: var(--brand-script);
+  font-size: 88px; line-height: 0.9;
+  letter-spacing: 0; text-transform: none;
+  padding-bottom: 6px;
+}
+.os-welcome-sub {
+  margin: 12px 0 0; color: #45433a; font-size: 17px;
+  font-family: var(--sans);
+}
+.os-welcome-actions {
+  display: flex; gap: 12px; margin-top: 26px;
+  flex-wrap: wrap; justify-content: center;
+}
+.os-welcome-actions .btn { font-size: 15px; padding: 12px 22px; }
+
+/* ---------- Desktop shortcut icons ---------- */
+.os-icons {
+  position: absolute;
+  top: 16px; left: 16px;
+  z-index: 1;                 /* under every window, above the grid only */
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(5, auto);
+  grid-auto-columns: 92px;
+  gap: 6px 10px;
+  align-content: start;
+}
+.os-icon {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center;
+  gap: 6px; padding: 10px 6px 8px;
+  width: 92px;
+  background: transparent; border: 2px solid transparent;
+  border-radius: 9px; cursor: pointer;
+  font-family: var(--sans);
+  transition: background 0.12s, border-color 0.12s;
+}
+.os-icon:hover { background: rgba(255, 255, 255, 0.72); border-color: var(--hairline); }
+.os-icon:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.os-icon-art {
+  display: flex; align-items: center; justify-content: center;
+  width: 46px; height: 46px; font-size: 23px;
+  background: var(--panel); border: 2px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 3px 3px 0 rgba(23, 22, 15, 0.16);
+}
+.os-icon.is-focused .os-icon-art { border-color: var(--blue); box-shadow: 3px 3px 0 var(--blue); }
+.os-icon.is-minimized .os-icon-art { opacity: 0.55; border-style: dashed; }
+.os-icon-label {
+  font-size: 12.5px; font-weight: 600; color: #2b2a20;
+  line-height: 1.25; text-align: center;
+  max-width: 88px;
+}
+.os-icon-dot {
+  position: absolute; top: 8px; right: 16px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--blue); border: 1.5px solid var(--paper);
+}
+/* Shortcut legend. This is instructional text, so it is sized and coloured to
+   be read at a glance rather than to recede — 14px minimum, near-black ink,
+   and keycaps with enough border weight to register as physical keys. */
+.os-hint {
+  margin-top: 30px;
+  max-width: 760px;
+  padding: 0 12px;
+}
+.os-hint p {
+  margin: 0 0 10px; font-family: var(--mono); font-size: 14px;
+  line-height: 1.7; color: #2b2a20;
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+}
+.os-hint-sub {
+  max-width: 62ch; margin-inline: auto;
+  text-transform: none; letter-spacing: 0.01em; font-weight: 500;
+  color: #45433a; line-height: 1.6;
+}
+.os-hint kbd, .os-launcher-foot kbd {
+  display: inline-block; margin: 0 3px; padding: 3px 8px;
+  background: #fff; border: 2px solid var(--ink);
+  border-radius: 5px; font-family: var(--mono); font-size: 13px;
+  font-weight: 700; color: var(--ink); line-height: 1.2;
+  box-shadow: 0 2px 0 rgba(23, 22, 15, 0.55);
+  vertical-align: middle;
+}
+
+/* Keep the legend legible on narrow screens instead of shrinking it. */
+@media (max-width: 600px) {
+  .os-hint p { font-size: 14px; letter-spacing: 0.02em; }
+  .os-hint kbd { font-size: 12px; padding: 3px 6px; }
+}
+
+/* ---------- Window ---------- */
+.oswin {
+  position: absolute;
+  background: var(--panel);
+  border: 2px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 4px 4px 0 rgba(23, 22, 15, 0.28);
+  display: flex;
+  flex-direction: column;
+  min-width: 320px;
+  min-height: 240px;
+  animation: oswin-in 0.13s ease-out;
+}
+@keyframes oswin-in {
+  from { transform: scale(0.97); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+.oswin.is-focused { box-shadow: 6px 6px 0 rgba(31, 71, 216, 0.45); }
+
+.oswin-bar {
+  height: 36px;
+  min-height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--paper);
+  border-bottom: 2px solid var(--line);
+  border-radius: 5px 5px 0 0;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.oswin.is-focused .oswin-bar { background: var(--blue-soft); }
+.oswin-bar:active { cursor: grabbing; }
+
+/* Traffic lights. Each carries its own label so the action is never
+   conveyed by colour alone; the dot shrinks when the label is showing. */
+/* The lights must never be squeezed or overlapped by the title, and the
+   title must be the only thing that yields space. */
+.oswin-lights {
+  display: flex; gap: 5px; align-items: center;
+  flex-shrink: 0; position: relative; z-index: 2;
+}
+.light {
+  position: relative;
+  display: flex; align-items: center; gap: 0;
+  height: 15px; padding: 0 3px; border-radius: 8px;
+  border: 1.5px solid var(--line);
+  /* These are buttons, not a drag handle — override the titlebar's grab cursor. */
+  cursor: pointer;
+  transition: gap 0.12s, padding 0.12s;
+}
+.light::before {
+  content: ''; display: block;
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+}
+.light-close::before { background: #ff5f57; }
+.light-min::before { background: #febc2e; }
+.light-max::before { background: #28c840; }
+
+.light-glyph {
+  display: none; font-size: 9px; line-height: 1; color: var(--ink);
+  font-weight: 700;
+}
+.light-word {
+  display: none; font-size: 11px; font-weight: 700; line-height: 1;
+  color: var(--ink); white-space: nowrap; font-family: var(--sans);
+}
+
+/* Hovering or focusing any light reveals all three labels at once, so the
+   meaning of each dot is visible without hovering them one at a time. */
+.oswin-lights:hover .light,
+.oswin-lights:focus-within .light { gap: 5px; padding: 0 7px 0 5px; }
+.oswin-lights:hover .light::before,
+.oswin-lights:focus-within .light::before { width: 8px; height: 8px; }
+.oswin-lights:hover .light-word,
+.oswin-lights:focus-within .light-word { display: inline; }
+.oswin-lights:hover .light::after,
+.oswin-lights:focus-within .light::after { display: none; }
+
+.light:hover { filter: brightness(1.08); }
+.light:active { transform: scale(0.94); }
+.light:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+.oswin-icon { font-size: 13px; flex-shrink: 0; }
+
+/* min-width:0 is what actually lets a flex child ellipsis instead of
+   pushing its siblings off the bar. */
+.oswin-title {
+  font-family: var(--serif); font-size: 13px; font-weight: 700;
+  letter-spacing: -0.01em; flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.oswin.is-focused .oswin-title { color: var(--blue-dark); }
+.oswin-dots { color: #9c9a8c; font-size: 12px; letter-spacing: 1px; flex-shrink: 0; }
+
+/* A chromeless window is a locked page, not a panel: no border, no radius,
+   no shadow, no minimum size — it simply fills the canvas and scrolls. */
+.oswin.is-chromeless {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  min-width: 0;
+  min-height: 0;
+  animation: none;
+}
+.oswin.is-chromeless .oswin-body { border-radius: 0; }
+
+.oswin-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--panel);
+  border-radius: 0 0 5px 5px;
+}
+
+.oswin-resize {
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 16px; height: 16px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background:
+    linear-gradient(135deg, transparent 50%, rgba(23, 22, 15, 0.35) 50%, rgba(23, 22, 15, 0.35) 60%, transparent 60%),
+    linear-gradient(135deg, transparent 72%, rgba(23, 22, 15, 0.35) 72%, rgba(23, 22, 15, 0.35) 82%, transparent 82%);
+}
+
+/* Pages render their own .page-head; inside a window we only need padding. */
+.oswin-body > * { padding: 20px 22px 28px; }
+.oswin-body .page-head { margin-top: 0; }
+
+/* ---------- Dock ---------- */
+.os-dock {
+  height: 58px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  background: var(--ink);
+  border-top: 2px solid var(--ink);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.os-dock::-webkit-scrollbar { display: none; }
+
+.dock-item {
+  position: relative;
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 7px;
+  background: #26251e; border: 2px solid #45433a;
+  border-radius: var(--radius); padding: 7px 11px;
+  color: #f4f2ea; cursor: pointer; font-size: 12px;
+  font-family: var(--sans);
+  transition: transform 0.1s, background 0.12s;
+}
+.dock-item:hover { background: #3a382f; transform: translateY(-2px); }
+.dock-item:focus-visible { outline: 2px solid #f4f2ea; outline-offset: 2px; }
+
+/* Open = blue tint. Focused app gets a stronger, higher-contrast fill plus a
+   heavier label, so "which window am I in" is readable at a glance. */
+.dock-item.is-running { border-color: #5b7cf0; background: #1c2452; }
+.dock-item.is-focused { border-color: #8fa6ff; background: #27307a; }
+.dock-item.is-focused .dock-label { font-weight: 700; }
+
+/* Minimised = muted outline, dimmed label, and a count badge. Still legible,
+   never mistaken for a closed app. */
+.dock-item.is-minimized { border-color: #4a4a5e; background: #23222b; }
+.dock-item.is-minimized .dock-label { color: #b6b4c4; }
+.dock-item.is-minimized:hover { background: #33313d; }
+
+.dock-files { background: #33312a; }
+.dock-emoji { font-size: 14px; line-height: 1; }
+.dock-label { white-space: nowrap; font-size: 11.5px; font-weight: 600; color: #f4f2ea; }
+.dock-dot {
+  position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 50%; background: #7f9bff;
+}
+
+.dock-sep { width: 2px; height: 26px; background: #45433a; flex-shrink: 0; margin: 0 4px; }
+.dock-windows { display: flex; gap: 6px; }
+.dock-window {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+  min-height: 36px;
+  background: transparent; border: 2px solid transparent;
+  border-radius: var(--radius);
+  /* Matches the launcher chips so an active window chip carries the same
+     visual weight as a resting pinned app. */
+  padding: 8px 14px;
+  color: #b6b4c4; cursor: pointer; font-size: 12px;
+  max-width: 210px; font-family: var(--sans);
+}
+.dock-window:hover { background: #26251e; color: #f4f2ea; }
+
+/* A minimised window is dimmed and flagged, never silently absent. */
+.dock-window.is-minimized { border-color: #4a4a5e; color: #b6b4c4; font-style: italic; }
+.dock-window.is-minimized:hover { border-color: #7f9bff; color: #fff; background: #33313d; }
+.dock-window.is-active {
+  border-color: #8fa6ff; color: #fff; background: #1c2452;
+  font-weight: 600;
+}
+
+/* Two shapes: a small dot on window chips, a count bubble on launcher items. */
+.dock-window .dock-flag { color: #b6b4c4; font-size: 15px; line-height: 1; }
+.dock-item .dock-flag {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 4px; margin-right: -2px;
+  background: #f4f2ea; color: #17160f; border-radius: 8px;
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700; line-height: 1;
+}
+
+.dock-window-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.dock-restore-all {
+  flex-shrink: 0; margin-left: 6px;
+  background: #f4f2ea; color: #17160f; border: 2px solid #f4f2ea;
+  border-radius: var(--radius); padding: 8px 13px;
+  font-family: var(--sans); font-size: 11.5px; font-weight: 700;
+  cursor: pointer;
+}
+.dock-restore-all:hover { background: #fff; }
+.dock-restore-all:focus-visible { outline: 2px solid #f4f2ea; outline-offset: 2px; }
+
+/* ---------- Launcher ---------- */
+.os-launcher-overlay {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(23, 22, 15, 0.6);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 12vh 20px 20px;
+}
+.os-launcher {
+  width: 100%; max-width: 460px;
+  background: #fff; border: 2px solid #f4f2ea;
+  border-radius: var(--radius); box-shadow: 8px 8px 0 var(--blue);
+  overflow: hidden;
+}
+.os-launcher-input {
+  width: 100%; padding: 14px 16px;
+  border: 0; border-bottom: 2px solid var(--line);
+  font-size: 15px; outline: none; font-family: var(--sans);
+  background: #fff; color: var(--ink);
+}
+.os-launcher-list { list-style: none; max-height: 46vh; overflow-y: auto; padding: 5px; }
+.os-launcher-item {
+  display: flex; align-items: center; gap: 11px;
+  width: 100%; text-align: left; background: transparent;
+  border: 0; border-radius: 5px; padding: 9px 11px;
+  cursor: pointer; font-size: 13.5px; font-family: var(--sans);
+  color: var(--ink);
+}
+.os-launcher-item.is-active { background: var(--blue); color: #fff; }
+.os-launcher-item .badge { margin-left: auto; }
+.os-launcher-emoji { font-size: 15px; }
+.os-launcher-title { flex: 1; font-weight: 600; }
+.os-launcher-foot {
+  display: flex; gap: 16px; padding: 12px 16px; flex-wrap: wrap;
+  border-top: 2px solid var(--line); background: var(--paper);
+  font-family: var(--mono); font-size: 13px;
+  text-transform: uppercase; letter-spacing: 0.03em;
+  color: #2b2a20; font-weight: 600;
+}
+
+/* ---------- Explorer ---------- */
+.os-explorer { display: flex; height: 100%; min-height: 0; }
+.os-explorer-side {
+  width: 220px; flex-shrink: 0;
+  border-right: 2px solid var(--line);
+  background: var(--paper);
+  overflow-y: auto; padding-bottom: 14px;
+}
+.os-explorer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; font-family: var(--mono);
+  font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.12em; color: #5c5a4e;
+  border-bottom: 1px solid var(--hairline);
+  position: sticky; top: 0; background: var(--paper); z-index: 1;
+}
+.os-explorer-head-sub { margin-top: 6px; }
+/* Sidebar rows were sitting almost against the window frame; the list and
+   each row now carry padding so icons and labels have room to breathe. */
+.os-explorer-list { list-style: none; padding: 8px 10px; }
+.os-explorer-row {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; text-align: left; background: transparent;
+  border: 2px solid transparent; border-radius: 6px;
+  padding: 8px 10px; cursor: pointer; font-size: 12.5px;
+  font-family: var(--sans); color: var(--ink);
+}
+.os-explorer-row:hover { background: var(--blue-soft); }
+.os-explorer-row.is-sel { background: var(--blue); color: #fff; border-color: var(--line); font-weight: 700; }
+.os-explorer-row.is-sel .muted { color: #d6ddf7; }
+.os-explorer-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.os-explorer-main { flex: 1; min-width: 0; overflow-y: auto; padding: 16px 18px; }
+.os-explorer-title {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 14px; margin-bottom: 16px; flex-wrap: wrap;
+}
+.os-explorer-title h3 { font-family: var(--serif); font-size: 21px; letter-spacing: -0.02em; }
+.os-explorer-title p { margin-top: 3px; }
+.os-explorer-meta { display: flex; gap: 7px; }
+
+.os-file-grid {
+  list-style: none;
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+}
+.os-file {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; text-align: left; background: #fff;
+  border: var(--border); border-radius: var(--radius);
+  padding: 10px 12px; cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+  box-shadow: var(--shadow-sm); font-family: var(--sans);
+}
+.os-file:hover { transform: translate(-1px, -1px); box-shadow: var(--shadow); }
+.os-file-icon { font-size: 17px; }
+.os-file-name {
+  flex: 1; font-size: 13px; font-weight: 700;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ---------- Mobile ---------- */
+@media (max-width: 760px) {
+  .os-menubar-items { display: none; }
+  .os-clock { display: none; }
+  .os-menubar { gap: 8px; padding: 0 8px; }
+  .os-mark { font-size: 13px; }
+  /* Keep "Close all" reachable on a phone; drop the secondary action and the
+     role badge so the right group still fits. */
+  .os-window-action--min { display: none; }
+  .os-menubar-right .badge { display: none; }
+  .os-window-action { padding: 6px 10px; font-size: 11px; }
+
+  /* Windows become full-bleed sheets; drag/resize is disabled by CSS. */
+  .oswin {
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    border-radius: 0; border-width: 0;
+    box-shadow: none;
+    animation: none;
+  }
+  .oswin-bar { border-radius: 0; height: 40px; }
+  .oswin-bar { cursor: default; }
+  .oswin-resize { display: none; }
+  .oswin-dots { display: none; }
+
+  .os-dock { height: 62px; gap: 5px; }
+  .dock-label { display: none; }
+  .dock-item { padding: 9px 11px; }
+  .dock-sep { display: none; }
+  .dock-windows { display: none; }
+
+  .os-welcome-card { padding: 28px 22px 24px; }
+  .os-welcome h1 { font-size: 34px; }
+  .os-welcome .os-welcome-logo { font-size: 56px; }
+  .os-welcome-sub { font-size: 15px; }
+  /* No room to lay icons out beside a centred card on a phone. */
+  .os-icons { display: none; }
+  .os-watermark { display: none; }
+  .os-launcher-overlay { padding: 8vh 12px 12px; }
+  .os-explorer { flex-direction: column; }
+  .os-explorer-side { width: 100%; border-right: 0; border-bottom: 2px solid var(--line); max-height: 40%; }
+  .os-file-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}

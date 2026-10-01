@@ -77,10 +77,28 @@ class EM_Notify {
 			if ( ! empty( $settings['email_pass'] ) ) {
 				$phpmailer->Password = $settings['email_pass'];
 			}
+			/* 587 uses STARTTLS, 465 uses implicit SSL. Gmail accepts both. */
 			$phpmailer->SMTPSecure = (int) $phpmailer->Port === 465 ? 'ssl' : 'tls';
-			if ( ! empty( $settings['email_from'] ) ) {
-				$phpmailer->From = $settings['email_from'];
-				$phpmailer->FromName = 'Estate Manager';
+			$phpmailer->CharSet    = 'UTF-8';
+
+			/* Gmail (and most providers) reject a From that doesn't match the
+			   authenticated account. Accept "Name <addr>" or a bare address,
+			   and default to the SMTP username rather than WordPress' own
+			   wordpress@host, which Gmail always refuses. */
+			$from = trim( (string) $settings['email_from'] );
+			if ( '' === $from ) {
+				$from = trim( (string) $settings['email_user'] );
+			}
+			if ( '' !== $from ) {
+				if ( preg_match( '/^(.*)<\s*([^>]+?)\s*>\s*$/', $from, $m ) ) {
+					$phpmailer->From = trim( $m[2] );
+					$name = trim( $m[1], " \t\"'" );
+					if ( '' !== $name ) {
+						$phpmailer->FromName = $name;
+					}
+				} else {
+					$phpmailer->From = $from;
+				}
 			}
 		};
 		add_action( 'phpmailer_init', $filter );
@@ -288,8 +306,8 @@ class EM_Notify {
 
 	public static function send_test_message( $channel, $recipient ) {
 		$settings = EM_Settings::all();
-		$subject  = 'Estate Manager — test message';
-		$body     = 'This is a test message from Estate Manager. If you can read this, your ' .
+		$subject  = 'Oikos — test message';
+		$body     = 'This is a test message from Oikos. If you can read this, your ' .
 			( 'sms' === $channel ? 'SMS (Africa\'s Talking)' : 'email (SMTP)' ) . ' integration is working.';
 		$result   = 'sms' === $channel
 			? self::send_sms( $recipient, $body, $settings )

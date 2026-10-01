@@ -51,6 +51,14 @@ class EM_Settings {
 				'api_key_set' => ! empty( $s['sms_api_key'] ),
 			);
 		}
+		/* Where reset links point. Surfaced here because a wrong value silently
+		   sends users to the wrong site. Falls back to the legacy WP option so
+		   existing installs keep working. */
+		$app_url = (string) ( $s['em_app_url'] ?? '' );
+		if ( ! $app_url ) {
+			$app_url = (string) get_option( 'em_app_url', '' );
+		}
+
 		return array(
 			'enabled'  => '1' === (string) $s['email_enabled'],
 			'host'     => $s['email_host'],
@@ -58,6 +66,7 @@ class EM_Settings {
 			'user'     => $s['email_user'],
 			'from'     => $s['email_from'],
 			'pass_set' => ! empty( $s['email_pass'] ),
+			'app_url'  => $app_url,
 		);
 	}
 

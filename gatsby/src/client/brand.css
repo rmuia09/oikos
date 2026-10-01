@@ -1,0 +1,48 @@
+/* ============================================================
+   Brand typography — Oikos.
+
+   Fonts are self-hosted (no runtime dependency on a font CDN) and
+   subset to Latin only, so the whole brand costs ~55KB.
+
+   - Cinzel: Roman inscriptional capitals. Used for the wordmark
+     wherever it must stay legible at small sizes.
+   - Great Vibes: a calligraphic script, reserved for large display
+     settings (landing hero, sign-in) where it can breathe.
+   ============================================================ */
+
+@font-face {
+  font-family: 'Cinzel';
+  font-style: normal;
+  font-weight: 400 900;
+  font-display: swap;
+  src: url('./fonts/cinzel-latin.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Great Vibes';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/greatvibes-latin.woff2') format('woff2');
+}
+
+:root {
+  --brand: 'Cinzel', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
+  --brand-script: 'Great Vibes', 'Snell Roundhand', 'Apple Chancery', cursive;
+}
+
+/* Carved-capital logotype, for app chrome. */
+.brand-word {
+  font-family: var(--brand);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+
+/* Calligraphic logotype, for display. */
+.brand-script {
+  font-family: var(--brand-script);
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}

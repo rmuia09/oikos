@@ -24,7 +24,7 @@ class EM_DB {
 		if ( ! get_role( 'estate_manager' ) ) {
 			add_role(
 				'estate_manager',
-				'Estate Manager',
+				'Oikos Manager',
 				array(
 					'read'            => true,
 					EM_CAP           => true,
@@ -227,6 +227,13 @@ class EM_DB {
   KEY created_at (created_at)
 ) $charset_collate;";
 
+		// dbDelta() ships in wp-admin/includes/upgrade.php, which is only loaded
+		// for admin requests. Activation can also run via WP-CLI or a cron/REST
+		// bootstrap, so require it explicitly.
+		if ( ! function_exists( 'dbDelta' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+		}
+
 		foreach ( $sql as $q ) {
 			dbDelta( $q );
 		}
@@ -253,6 +260,12 @@ class EM_DB {
 			'email_user'            => '',
 			'email_pass'            => '',
 			'email_from'            => '',
+			/* Public URL of the Gatsby app. Password-reset links are built
+			   from this; without it they would point at WordPress instead. */
+			'em_app_url'            => '',
+			/* Country code assumed for phone numbers typed without one.
+			   254 = Kenya. Change this to move to another market. */
+			'phone_country_code'    => '254',
 		);
 	}
 
