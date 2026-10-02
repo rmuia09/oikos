@@ -26,10 +26,12 @@ export function WindowProvider({ children }) {
           title: app.title,
           icon: app.icon,
           chromeless: !!app.chromeless,
-          snap: opts.snap || null
+          snap: opts.snap || null,
+          params: opts.params || null
         }),
       []
     ),
+    setParams: useCallback((id, params) => dispatch({ type: 'params', id, params }), []),
     focus: useCallback((id) => dispatch({ type: 'focus', id }), []),
     close: useCallback((id) => dispatch({ type: 'close', id }), []),
     minimize: useCallback((id) => dispatch({ type: 'minimize', id }), []),

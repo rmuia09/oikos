@@ -10,19 +10,53 @@ class EM_Notify {
 
 	/* ---------------- Delivery ---------------- */
 
-	/** Africa's Talking SMS. Returns array( ok, simulated, messageId, error ). */
+	/**
+	 * Send an SMS through the configured provider.
+	 *
+	 * Providers:
+	 *   africas_talking — hosted A2P gateway (sandbox or live)
+	 *   sms_gate        — SMS Gate for Android (sms-gate.app), self-hosted or cloud
+	 *   textbee         — textbee.dev, Android gateway
+	 *   generic         — any HTTP endpoint, via a JSON body template
+	 *
+	 * Returns array( ok, simulated, messageId, error ). A `simulated` result
+	 * means the provider is disabled or under-configured — never a real send.
+	 */
 	public static function send_sms( $recipient, $message, $settings = null ) {
 		$settings = $settings ? $settings : EM_Settings::all();
-		$enabled  = '1' === (string) $settings['sms_enabled'];
+
+		if ( '1' !== (string) $settings['sms_enabled'] ) {
+			return self::simulated();
+		}
+
+		switch ( (string) ( $settings['sms_provider'] ?? 'africas_talking' ) ) {
+			case 'sms_gate':
+				return self::send_via_sms_gate( $recipient, $message, $settings );
+			case 'textbee':
+				return self::send_via_textbee( $recipient, $message, $settings );
+			case 'generic':
+				return self::send_via_generic( $recipient, $message, $settings );
+			case 'africas_talking':
+			default:
+				return self::send_via_africas_talking( $recipient, $message, $settings );
+		}
+	}
+
+	private static function simulated() {
+		return array( 'ok' => true, 'simulated' => true, 'messageId' => null, 'error' => null );
+	}
+
+	/** Africa's Talking (hosted A2P). */
+	private static function send_via_africas_talking( $recipient, $message, $settings ) {
 		$username = trim( (string) $settings['sms_username'] );
 		$api_key  = trim( (string) $settings['sms_api_key'] );
-		if ( ! $enabled || ! $username || ! $api_key ) {
-			return array( 'ok' => true, 'simulated' => true, 'messageId' => null, 'error' => null );
+		if ( ! $username || ! $api_key ) {
+			return self::simulated();
 		}
-		$sandbox   = '1' === (string) $settings['sms_sandbox'];
-		$host      = $sandbox ? 'api.sandbox.africastalking.com' : 'api.africastalking.com';
-		$from      = trim( (string) $settings['sms_from'] );
-		$body      = array(
+		$sandbox = '1' === (string) $settings['sms_sandbox'];
+		$host    = $sandbox ? 'api.sandbox.africastalking.com' : 'api.africastalking.com';
+		$from    = trim( (string) $settings['sms_from'] );
+		$body    = array(
 			'username' => $sandbox ? 'sandbox' : $username,
 			'to'       => $recipient,
 			'message'  => $message,
@@ -33,25 +67,154 @@ class EM_Notify {
 		$resp = wp_remote_post( "https://{$host}/version1/messaging", array(
 			'timeout' => 15,
 			'headers' => array(
-				'apiKey'      => $api_key,
-				'Accept'      => 'application/json',
+				'apiKey'       => $api_key,
+				'Accept'       => 'application/json',
 				'Content-Type' => 'application/x-www-form-urlencoded',
 			),
 			'body'    => $body,
 		) );
 		if ( is_wp_error( $resp ) ) {
-			return array( 'ok' => false, 'simulated' => false, 'messageId' => null, 'error' => $resp->get_error_message() );
+			return self::failure( $resp->get_error_message() );
 		}
 		$data = json_decode( wp_remote_retrieve_body( $resp ), true );
 		$list = $data['SMSMessageData']['Recipients'] ?? array();
 		if ( isset( $list[0] ) ) {
 			$first = $list[0];
 			if ( ( $first['status'] ?? '' ) === 'Success' || ( $first['statusCode'] ?? '' ) === 101 ) {
-				return array( 'ok' => true, 'simulated' => false, 'messageId' => $first['messageId'] ?? null, 'error' => null );
+				return self::success( $first['messageId'] ?? null );
 			}
-			return array( 'ok' => false, 'simulated' => false, 'messageId' => null, 'error' => $first['failureReason'] ?? 'SMS failed' );
+			return self::failure( $first['failureReason'] ?? 'SMS failed' );
 		}
-		return array( 'ok' => true, 'simulated' => false, 'messageId' => null, 'error' => null );
+		return self::success( null );
+	}
+
+	/**
+	 * SMS Gate for Android — https://sms-gate.app
+	 * POST {base}/api/3rdparty/v1/messages with HTTP Basic auth.
+	 * Point `sms_base_url` at a private server, or leave it for the cloud.
+	 */
+	private static function send_via_sms_gate( $recipient, $message, $settings ) {
+		$user = trim( (string) $settings['sms_username'] );
+		$pass = (string) $settings['sms_api_key'];
+		if ( ! $user || ! $pass ) {
+			return self::simulated();
+		}
+		$base = rtrim( trim( (string) ( $settings['sms_base_url'] ?? '' ) ), '/' );
+		if ( '' === $base ) {
+			$base = 'https://api.sms-gate.app';
+		}
+		$resp = wp_remote_post( $base . '/api/3rdparty/v1/messages', array(
+			'timeout' => 20,
+			'headers' => array(
+				'Content-Type'  => 'application/json',
+				'Accept'        => 'application/json',
+				'Authorization' => 'Basic ' . base64_encode( $user . ':' . $pass ),
+			),
+			'body'    => wp_json_encode( array(
+				'phoneNumbers' => array( $recipient ),
+				'textMessage'  => array( 'text' => $message ),
+			) ),
+		) );
+		return self::interpret_json( $resp );
+	}
+
+	/**
+	 * textbee — https://textbee.dev
+	 * POST {base}/api/v1/gateway/devices/{deviceId}/send-sms with x-api-key.
+	 */
+	private static function send_via_textbee( $recipient, $message, $settings ) {
+		$key    = trim( (string) $settings['sms_api_key'] );
+		$device = trim( (string) ( $settings['sms_device_id'] ?? '' ) );
+		if ( ! $key || ! $device ) {
+			return self::simulated();
+		}
+		$base = rtrim( trim( (string) ( $settings['sms_base_url'] ?? '' ) ), '/' );
+		if ( '' === $base ) {
+			$base = 'https://api.textbee.dev';
+		}
+		$resp = wp_remote_post( "{$base}/api/v1/gateway/devices/{$device}/send-sms", array(
+			'timeout' => 20,
+			'headers' => array(
+				'Content-Type' => 'application/json',
+				'Accept'       => 'application/json',
+				'x-api-key'    => $key,
+			),
+			'body'    => wp_json_encode( array(
+				'recipients' => array( $recipient ),
+				'message'    => $message,
+			) ),
+		) );
+		return self::interpret_json( $resp );
+	}
+
+	/**
+	 * Generic HTTP gateway. `sms_generic_body` is a JSON template using
+	 * {{to}} and {{message}}, so any provider's shape can be matched.
+	 */
+	private static function send_via_generic( $recipient, $message, $settings ) {
+		$url = trim( (string) ( $settings['sms_generic_url'] ?? '' ) );
+		if ( '' === $url ) {
+			return self::simulated();
+		}
+		$template = trim( (string) ( $settings['sms_generic_body'] ?? '' ) );
+		if ( '' === $template ) {
+			$template = '{"to":"{{to}}","message":"{{message}}"}';
+		}
+		/* Replace with JSON-escaped values so the template stays valid JSON. */
+		$body = str_replace(
+			array( '{{to}}', '{{message}}' ),
+			array( self::json_inner( $recipient ), self::json_inner( $message ) ),
+			$template
+		);
+		$headers = array(
+			'Content-Type' => 'application/json',
+			'Accept'       => 'application/json',
+		);
+		$auth = trim( (string) ( $settings['sms_generic_auth'] ?? '' ) );
+		if ( '' !== $auth ) {
+			$headers['Authorization'] = $auth;
+		}
+		$resp = wp_remote_post( $url, array(
+			'timeout' => 20,
+			'headers' => $headers,
+			'body'    => $body,
+		) );
+		return self::interpret_json( $resp );
+	}
+
+	/** JSON-encode a string, then strip the surrounding quotes. */
+	private static function json_inner( $value ) {
+		$encoded = wp_json_encode( (string) $value );
+		return substr( $encoded, 1, -1 );
+	}
+
+	private static function success( $message_id = null ) {
+		return array( 'ok' => true, 'simulated' => false, 'messageId' => $message_id, 'error' => null );
+	}
+
+	private static function failure( $error ) {
+		return array( 'ok' => false, 'simulated' => false, 'messageId' => null, 'error' => $error );
+	}
+
+	/** Map an HTTP response to the standard result shape. */
+	private static function interpret_json( $resp ) {
+		if ( is_wp_error( $resp ) ) {
+			return self::failure( $resp->get_error_message() );
+		}
+		$code = (int) wp_remote_retrieve_response_code( $resp );
+		$data = json_decode( wp_remote_retrieve_body( $resp ), true );
+
+		if ( $code >= 200 && $code < 300 ) {
+			$id = is_array( $data )
+				? ( $data['id'] ?? $data['messageId'] ?? $data['messageID'] ?? null )
+				: null;
+			return self::success( $id );
+		}
+
+		$error = is_array( $data )
+			? ( $data['message'] ?? $data['error'] ?? $data['detail'] ?? null )
+			: null;
+		return self::failure( $error ? $error : ( 'HTTP ' . $code ) );
 	}
 
 	/**
@@ -306,9 +469,16 @@ class EM_Notify {
 
 	public static function send_test_message( $channel, $recipient ) {
 		$settings = EM_Settings::all();
+		$provider = (string) ( $settings['sms_provider'] ?? 'africas_talking' );
+		$labels   = array(
+			'africas_talking' => 'SMS (Africa\'s Talking)',
+			'sms_gate'        => 'SMS (SMS Gate for Android)',
+			'textbee'         => 'SMS (textbee)',
+			'generic'         => 'SMS (generic HTTP gateway)',
+		);
 		$subject  = 'Oikos — test message';
 		$body     = 'This is a test message from Oikos. If you can read this, your ' .
-			( 'sms' === $channel ? 'SMS (Africa\'s Talking)' : 'email (SMTP)' ) . ' integration is working.';
+			( 'sms' === $channel ? ( $labels[ $provider ] ?? 'SMS' ) : 'email (SMTP)' ) . ' integration is working.';
 		$result   = 'sms' === $channel
 			? self::send_sms( $recipient, $body, $settings )
 			: self::send_email( $recipient, $subject, $body, $settings );

@@ -39,14 +39,26 @@ class EM_Helpers {
 		return (int) ceil( ( $d - current_time( 'timestamp' ) ) / DAY_IN_SECONDS );
 	}
 
+	/**
+	 * Add (or subtract) whole months, clamping the day to the target month's
+	 * length. Works with negative offsets — PHP's % keeps the sign of a
+	 * negative dividend, which previously produced an invalid month like
+	 * "-2" and made strtotime() fail, yielding 1970-01-01.
+	 */
 	public static function add_months( $ts, $months ) {
-		$d      = (int) date( 'j', $ts );
-		$y      = (int) date( 'Y', $ts );
-		$m      = (int) date( 'n', $ts );
-		$new_m  = $m + (int) $months;
-		$new_y  = $y + (int) floor( ( $new_m - 1 ) / 12 );
-		$new_m  = ( ( $new_m - 1 ) % 12 ) + 1;
-		$last   = (int) date( 't', strtotime( "{$new_y}-{$new_m}-01" ) );
+		$d     = (int) date( 'j', $ts );
+		$y     = (int) date( 'Y', $ts );
+		$m     = (int) date( 'n', $ts );
+		$total = ( $y * 12 + ( $m - 1 ) ) + (int) $months;
+
+		$new_y = intdiv( $total, 12 );
+		$new_m = ( $total % 12 ) + 1;
+		if ( $new_m < 1 ) {
+			$new_m += 12;
+			$new_y--;
+		}
+
+		$last = (int) date( 't', strtotime( sprintf( '%04d-%02d-01', $new_y, $new_m ) ) );
 		return strtotime( sprintf( '%04d-%02d-%02d', $new_y, $new_m, min( $d, $last ) ) );
 	}
 

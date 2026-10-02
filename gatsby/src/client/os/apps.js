@@ -5,6 +5,7 @@ import Units from '../pages/Units.jsx'
 import Tenants from '../pages/Tenants.jsx'
 import Onboarding from '../pages/Onboarding.jsx'
 import Payments from '../pages/Payments.jsx'
+import Leases from '../pages/Leases.jsx'
 import Reports from '../pages/Reports.jsx'
 import Renewals from '../pages/Renewals.jsx'
 import Utilities from '../pages/Utilities.jsx'
@@ -27,6 +28,7 @@ export default [
   { id: 'payments', title: 'Rent Payments', icon: '💰', view: Payments },
   { id: 'reports', title: 'Income Reports', icon: '📈', view: Reports },
   { id: 'renewals', title: 'Lease Renewals', icon: '📅', view: Renewals },
+  { id: 'leases', title: 'Leases', icon: '📜', view: Leases },
   { id: 'utilities', title: 'Utilities', icon: '💧', view: Utilities },
   { id: 'notifications', title: 'Notifications', icon: '🔔', view: Notifications },
   { id: 'activity', title: 'Activity', icon: '🧾', view: Activity },

@@ -13,7 +13,7 @@ const fmtMonth = (ym) => {
   return new Date(y, m - 1, 1).toLocaleDateString('en-KE', { month: 'short', year: 'numeric' })
 }
 
-export default function Payments() {
+export default function Payments({ params }) {
   const { data: units } = useResource('/api/units')
   const { data: tenants } = useResource('/api/tenants')
   const { data: props } = useResource('/api/properties')
@@ -39,6 +39,7 @@ export default function Payments() {
   const [lFrom, setLFrom] = useState(() => currentMonth())
   const [lTo, setLTo] = useState(() => currentMonth())
   const [lProp, setLProp] = useState('')
+  const [lTenant, setLTenant] = useState('')
   const [lSearch, setLSearch] = useState('')
 
   const [form, setForm] = useState({ amount: '', payment_date: '', period: '', method: 'cash', notes: '' })
@@ -90,14 +91,40 @@ export default function Payments() {
     } catch (x) { setErr(x.message) }
   }
 
-  async function loadLedger() {
+  async function loadLedger(fromOverride, toOverride, tenantOverride) {
+    const from = fromOverride ?? lFrom
+    const to = toOverride ?? lTo
+    const tenant = tenantOverride ?? lTenant
     setLedgerLoading(true); setErr('')
     try {
-      const q = new URLSearchParams({ from: lFrom, to: lTo })
+      const q = new URLSearchParams({ from, to })
       if (lProp) q.set('property_id', lProp)
+      /* Narrow server-side. Computing every tenant's ledger and filtering it
+         in the browser is the slow part of the drill-down. */
+      if (tenant) q.set('tenant_id', tenant)
       setLedger(await api.get(`/api/reports/rent-ledger?${q}`))
     } catch (x) { setErr(x.message) } finally { setLedgerLoading(false) }
   }
+
+  /* Arriving from a dashboard card: open the ledger over the last 12 months,
+     and when a tenant is named, narrow both the list and the ledger to them. */
+  useEffect(() => {
+    if (!params || (!params.arrears && !params.tenant)) return
+    const now = new Date()
+    const ym = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+    const from = ym(new Date(now.getFullYear(), now.getMonth() - 11, 1))
+    const to = ym(now)
+
+    if (params.tenant) {
+      setFTenant(String(params.tenant))
+      setLTenant(String(params.tenant))
+      setLSearch(params.tenantName || '')
+    }
+    setLFrom(from)
+    setLTo(to)
+    loadLedger(from, to, params.tenant ? String(params.tenant) : undefined)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params])
 
   const ledgerRows = useMemo(() => {
     if (!ledger) return []
@@ -220,7 +247,15 @@ export default function Payments() {
               {props && props.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
             <input className="inp" placeholder="Filter tenant…" value={lSearch} onChange={(e) => setLSearch(e.target.value)} />
-            <button className="btn" onClick={loadLedger} disabled={ledgerLoading}>{ledgerLoading ? 'Loading…' : 'Load ledger'}</button>
+            <button
+              className="btn"
+              /* Not `onClick={loadLedger}` — that would pass the click event as
+                 the date range. Also clears any tenant drill-down filter. */
+              onClick={() => { setLTenant(''); loadLedger(lFrom, lTo, '') }}
+              disabled={ledgerLoading}
+            >
+              {ledgerLoading ? 'Loading…' : 'Load ledger'}
+            </button>
           </div>
         </div>
 

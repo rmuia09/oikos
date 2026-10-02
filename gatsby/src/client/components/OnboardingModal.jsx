@@ -18,7 +18,11 @@ export default function OnboardingModal({ unitId, onDone, onClose }) {
     start_date: todayStr(),
     duration_months: 12,
     monthly_rent: '',
-    renewal_months: 12
+    renewal_months: 12,
+    /* Blank = use the estate's tenancy exit policy. */
+    deposit_amount: '',
+    notice_period_days: '',
+    early_termination_fee: ''
   })
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -58,6 +62,9 @@ export default function OnboardingModal({ unitId, onDone, onClose }) {
         monthly_rent: Number(form.monthly_rent),
         renewal_months: Number(form.renewal_months)
       }
+      if (form.deposit_amount !== '') payload.deposit_amount = Number(form.deposit_amount)
+      if (form.notice_period_days !== '') payload.notice_period_days = Number(form.notice_period_days)
+      if (form.early_termination_fee !== '') payload.early_termination_fee = Number(form.early_termination_fee)
       const r = await api.post('/api/onboarding', payload)
       onDone && onDone(r)
     } catch (x) {
@@ -151,6 +158,19 @@ export default function OnboardingModal({ unitId, onDone, onClose }) {
             <label>Renewal frequency (months) *</label>
             <input type="number" min="1" value={form.renewal_months} onChange={set('renewal_months')} required />
             <span className="hint">Lease renews every N months; reminders are sent automatically before expiry.</span>
+          </div>
+          <div className="field">
+            <label>Deposit (KES)</label>
+            <input type="number" min="0" value={form.deposit_amount} onChange={set('deposit_amount')} placeholder="Estate default" />
+          </div>
+          <div className="field">
+            <label>Notice period (days)</label>
+            <input type="number" min="0" value={form.notice_period_days} onChange={set('notice_period_days')} placeholder="Estate default" />
+          </div>
+          <div className="field">
+            <label>Early-termination charge (KES)</label>
+            <input type="number" min="0" value={form.early_termination_fee} onChange={set('early_termination_fee')} placeholder="Estate default" />
+            <span className="hint">Charged only if the tenant leaves before the end date.</span>
           </div>
         </div>
         <div className="preview-box" style={{ marginTop: 14 }}>

@@ -1,0 +1,21 @@
+# Copy this file to the repository root (next to README.md) when deploying
+# with Netlify. Netlify reads netlify.toml from the root by default.
+#
+# Set the two URLs to your real values before committing, or override them in
+# the Netlify UI under Site settings → Environment variables.
+
+[build]
+  base = "gatsby"
+  command = "npm ci && npm run build"
+  publish = "public"
+
+[build.environment]
+  GATSBY_WP_URL = "https://example.com"
+  GATSBY_SITE_URL = "https://app.example.com"
+
+# Single-page app: send unknown paths to index.html so /app/ and any future
+# client-side routes resolve.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

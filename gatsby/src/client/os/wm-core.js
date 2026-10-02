@@ -110,7 +110,7 @@ export function reducer(state, action) {
       }
 
     case 'open': {
-      const { appId, title, icon, rect, chromeless, snap } = action
+      const { appId, title, icon, rect, chromeless, snap, params } = action
       const z = topZ(state.windows) + 1
       /* A chromeless app opens already snapped to the full canvas and keeps
          that state, so it behaves as a locked page rather than a panel. */
@@ -121,6 +121,8 @@ export function reducer(state, action) {
         title,
         icon,
         chromeless: !!chromeless,
+        /* Optional intent handed to the app, e.g. a preset filter. */
+        params: params || null,
         rect:
           rect ||
           (initialSnap
@@ -139,6 +141,15 @@ export function reducer(state, action) {
         snapPreview: null
       }
     }
+
+    /* Update the intent handed to an already-open window. */
+    case 'params':
+      return {
+        ...state,
+        windows: state.windows.map((w) =>
+          w.id === action.id ? { ...w, params: action.params || null } : w
+        )
+      }
 
     case 'focus': {
       const win = state.windows.find((w) => w.id === action.id)

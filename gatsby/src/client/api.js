@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 
 const TOKEN_KEY = 'estate_token'
-const WP_URL = (process.env.GATSBY_WP_URL || 'http://localhost:8888').replace(/\/+$/, '')
-const API_BASE = `${WP_URL}/wp-json/em/v1`
+/* Empty GATSBY_WP_URL means "the site we are served from" — the app and the
+   REST API share an origin, which is the case when the app is bundled into a
+   WordPress plugin. No CORS, no absolute host baked into the bundle. */
+const WP_URL = (process.env.GATSBY_WP_URL || '').replace(/\/+$/, '')
+const API_BASE = WP_URL ? `${WP_URL}/wp-json/em/v1` : '/wp-json/em/v1'
 
 export const getToken = () => localStorage.getItem(TOKEN_KEY)
 export const setToken = (t) => (t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY))
@@ -46,8 +49,9 @@ async function req(path, opts = {}) {
       ...opts
     })
   } catch (e) {
+    const where = WP_URL || 'the server'
     const err = new Error(
-      `Cannot reach the server at ${WP_URL}. Check that it is running, then try again.`
+      `Cannot reach ${where}. Check that it is running, then try again.`
     )
     err.status = 0
     err.retryable = true
@@ -69,6 +73,13 @@ async function req(path, opts = {}) {
     if (data && data.errors && typeof data.errors === 'object') err.fields = data.errors
     throw err
   }
+
+  /* A successful write invalidates every other window's copy of the data —
+     recording a payment must move the dashboard, not just this window. */
+  if ((opts.method || 'GET').toUpperCase() !== 'GET') {
+    window.dispatchEvent(new Event('estate:data-changed'))
+  }
+
   return data
 }
 
@@ -85,19 +96,42 @@ export function useResource(path) {
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
+  /* `silent` refetches in the background without flashing the loading state,
+     which is what automatic refreshes want. */
+  const refresh = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       setData(await api.get(path))
       setError(null)
     } catch (e) {
       setError(e.message)
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [path])
 
   useEffect(() => { refresh() }, [refresh])
+
+  /* Stay in sync with the rest of the app: refetch when any window writes,
+     and when the tab is brought back to the foreground. Debounced so a burst
+     of writes causes one refetch, not one per write. */
+  useEffect(() => {
+    let timer = null
+    const schedule = () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => refresh(true), 250)
+    }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') schedule()
+    }
+    window.addEventListener('estate:data-changed', schedule)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('estate:data-changed', schedule)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [refresh])
 
   return { data, error, loading, refresh }
 }

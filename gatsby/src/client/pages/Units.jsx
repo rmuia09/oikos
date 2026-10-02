@@ -8,10 +8,11 @@ import OnboardingModal from '../components/OnboardingModal.jsx'
 import Paginator, { usePagination } from '../components/Paginator.jsx'
 import RowMenu from '../components/RowMenu.jsx'
 import ErrorBanner from '../components/ErrorBanner.jsx'
+import VacateModal from '../components/VacateModal.jsx'
 
 const empty = { property_id: '', unit_number: '', unit_type: 'apartment', monthly_rent: '', status: 'vacant' }
 
-export default function Units() {
+export default function Units({ params }) {
   const { data: units, loading, error, refresh } = useResource('/api/units')
   const { data: props } = useResource('/api/properties')
   const [form, setForm] = useState(empty)
@@ -23,9 +24,14 @@ export default function Units() {
   const [vacate, setVacate] = useState(null)
   const [filterText, setFilterText] = useState('')
   const [filterProp, setFilterProp] = useState('')
-  const [filterStatus, setFilterStatus] = useState('')
+  const [filterStatus, setFilterStatus] = useState(params?.status || '')
   const [err, setErr] = useState('')
   const [msg, setMsg] = useState('')
+
+  /* A dashboard card can re-target an already-open Units window with a filter. */
+  useEffect(() => {
+    if (params && 'status' in params) setFilterStatus(params.status || '')
+  }, [params])
 
   function openAdd() { setForm(empty); setAdding(true) }
   function openEdit(u) { setForm({ property_id: u.property_id, unit_number: u.unit_number, unit_type: u.unit_type, monthly_rent: u.monthly_rent, status: u.status }); setEditing(u) }
@@ -60,9 +66,9 @@ export default function Units() {
     } catch (x) { setErr(x.message) }
   }
 
-  async function doVacate(reason) {
-    const r = await api.post(`/api/units/${vacate.id}/vacate`, { reason })
-    setMsg(`Unit ${vacate.unit_number} marked vacant${r.leases_ended ? ` and ${r.leases_ended} lease(s) ended` : ''}`)
+  /* VacateModal posts the settlement itself; this just reports the result. */
+  function onVacated(unit) {
+    setMsg(`Unit ${unit.unit_number} marked vacant and its lease ended`)
     setVacate(null)
     refresh()
   }
@@ -244,20 +250,10 @@ export default function Units() {
       )}
 
       {vacate && (
-        <ConfirmDelete
-          title="Vacate unit"
-          confirmLabel="End lease & mark vacant"
-          message={(
-            <div>
-              <p>Mark <strong>{vacate.unit_number}</strong> ({vacate.property_name}) as vacant and end its active lease?</p>
-              <p className="muted small" style={{ marginTop: 8 }}>
-                The tenant and payment history stay on record; the lease is marked <strong>terminated</strong> so
-                occupancy and leases stay consistent. This action is logged in the audit trail.
-              </p>
-            </div>
-          )}
-          onConfirm={doVacate}
+        <VacateModal
+          unit={vacate}
           onClose={() => setVacate(null)}
+          onDone={() => onVacated(vacate)}
         />
       )}
     </div>

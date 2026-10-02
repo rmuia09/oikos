@@ -11,5 +11,8 @@ module.exports = {
     description: 'Rental, lease and utility management, powered by WordPress',
     siteUrl: process.env.GATSBY_SITE_URL || 'http://localhost:8001',
   },
+  /* Serve the app from a subpath (e.g. /oikos) when it is bundled inside a
+     WordPress plugin on the same domain. Build with --prefix-paths. */
+  pathPrefix: process.env.GATSBY_PATH_PREFIX || '',
   plugins: [],
 }

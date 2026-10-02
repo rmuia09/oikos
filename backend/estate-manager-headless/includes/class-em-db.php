@@ -138,9 +138,18 @@ class EM_DB {
   end_date date NOT NULL,
   monthly_rent decimal(12,2) NOT NULL DEFAULT 0,
   renewal_months int NOT NULL DEFAULT 12,
+  deposit_amount decimal(12,2) NOT NULL DEFAULT 0,
+  notice_period_days int NOT NULL DEFAULT 30,
+  early_termination_fee decimal(12,2) NOT NULL DEFAULT 0,
   status varchar(20) NOT NULL DEFAULT 'active',
   notice_sent tinyint(1) NOT NULL DEFAULT 0,
   notice_sent_at datetime NULL,
+  vacate_type varchar(30) NULL,
+  vacated_at date NULL,
+  settlement_fee decimal(12,2) NOT NULL DEFAULT 0,
+  settlement_deductions decimal(12,2) NOT NULL DEFAULT 0,
+  settlement_refund decimal(12,2) NOT NULL DEFAULT 0,
+  settlement_notes text NULL,
   created_at datetime NULL,
   PRIMARY KEY  (id),
   KEY unit_id (unit_id),
@@ -249,11 +258,19 @@ class EM_DB {
 			'currency'               => 'KSh',
 			'payment_methods'        => 'cash,M-Pesa,bank',
 			'sms_enabled'           => '0',
+			/* africas_talking | sms_gate | textbee | generic */
 			'sms_provider'          => 'africas_talking',
 			'sms_username'          => '',
 			'sms_api_key'           => '',
 			'sms_from'              => '',
 			'sms_sandbox'           => '1',
+			/* Android gateways */
+			'sms_device_id'         => '',
+			'sms_base_url'          => '',
+			/* Generic HTTP gateway */
+			'sms_generic_url'       => '',
+			'sms_generic_auth'      => '',
+			'sms_generic_body'      => '',
 			'email_enabled'         => '0',
 			'email_host'            => '',
 			'email_port'            => '587',
@@ -266,6 +283,23 @@ class EM_DB {
 			/* Country code assumed for phone numbers typed without one.
 			   254 = Kenya. Change this to move to another market. */
 			'phone_country_code'    => '254',
+
+			/* --- Tenancy exit policy (configurable, not legal advice) ---
+			   These are defaults copied onto each new lease, which can then
+			   override them. See README for the Kenyan statutory context. */
+			/* Notice a tenant must give before vacating, in days.
+			   30 matches the Rent Restriction Act (Cap 296) minimum for
+			   controlled residential tenancies; 60 for commercial (Cap 301). */
+			'default_notice_period_days'        => '30',
+			/* Security deposit, expressed in months of rent. */
+			'default_deposit_months'            => '1',
+			/* Early-termination charge, in months of rent. 0 = none.
+			   Purely contractual: Kenyan law sets notice periods, not
+			   penalties, so this must match the signed lease. */
+			'default_early_termination_fee_months' => '0',
+			/* When on, vacating an unexpired lease requires confirming that
+			   notice was served, or an explicit override. */
+			'require_notice_before_vacate'      => '1',
 		);
 	}
 
@@ -386,32 +420,37 @@ class EM_DB {
 			$rent       = $ur['rent'];
 			$notice     = ( $due_soon && $i % 2 === 0 ) ? 1 : 0;
 			$renew      = $due_soon ? 3 : 12;
+			$deposit    = round( (float) $rent, 2 );   // one month
 
 			$wpdb->query( $wpdb->prepare(
-				"INSERT INTO {$leases_t} (unit_id, tenant_id, start_date, end_date, monthly_rent, renewal_months, status, notice_sent, notice_sent_at, created_at) VALUES (%d, %d, %s, %s, %f, %d, 'active', %d, %s, %s)",
-				$ur['unit_id'], $tenant_id, date( 'Y-m-d', $start ), date( 'Y-m-d', $end ), $rent, $renew, $notice,
+				"INSERT INTO {$leases_t} (unit_id, tenant_id, start_date, end_date, monthly_rent, renewal_months, deposit_amount, notice_period_days, early_termination_fee, status, notice_sent, notice_sent_at, created_at) VALUES (%d, %d, %s, %s, %f, %d, %f, %d, %f, 'active', %d, %s, %s)",
+				$ur['unit_id'], $tenant_id, date( 'Y-m-d', $start ), date( 'Y-m-d', $end ), $rent, $renew, $deposit, 30, 0.0, $notice,
 				$notice ? current_time( 'mysql' ) : null, $now
 			) );
 			$lease_id = (int) $wpdb->insert_id;
 
-			/* Payments across ~12 months, mirroring the original random spread. */
+			/* Payments for each month the lease has actually run — never before
+			   the start date and never in the future. A payment dated outside
+			   the tenancy can't be credited to any month, which previously left
+			   "collected" money that no ledger recognised. */
 			$months = array();
-			$monday = strtotime( 'monday this week' );
-			for ( $w = 0; $w < 12; $w++ ) {
-				$ws  = date( 'Y-m', strtotime( "-{$w} weeks", $monday ) );
-				if ( ! in_array( $ws, $months, true ) ) {
-					$months[] = $ws;
-				}
+			$cursor = strtotime( date( 'Y-m', $start ) . '-01' );
+			$last   = min( $end, time() );
+			while ( $cursor <= $last ) {
+				$months[] = date( 'Y-m', $cursor );
+				$cursor   = EM_Helpers::add_months( $cursor, 1 );
 			}
 			foreach ( $months as $month ) {
-				if ( wp_rand( 1, 100 ) > 82 ) {
+				/* Most months paid; a few missed, some short — so the demo has
+				   realistic arrears rather than everyone owing everything. */
+				if ( wp_rand( 1, 100 ) > 85 ) {
 					continue;
 				}
 				$pdate   = strtotime( $month . '-01' ) + wp_rand( 0, 27 ) * DAY_IN_SECONDS;
 				if ( $pdate > time() ) {
 					$pdate = time();
 				}
-				$pay    = wp_rand( 1, 100 ) > 25 ? $rent : round( $rent * ( 0.4 + wp_rand( 0, 40 ) / 100 ) );
+				$pay    = wp_rand( 1, 100 ) > 80 ? $rent : round( $rent * ( 0.4 + wp_rand( 0, 50 ) / 100 ), 2 );
 				$methods = array_keys( EM_Settings::payment_methods() );
 				$method  = $methods[ array_rand( $methods ) ];
 				$wpdb->query( $wpdb->prepare(

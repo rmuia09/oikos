@@ -5,6 +5,10 @@ import ErrorBanner from '../components/ErrorBanner.jsx'
 
 export default function Dashboard({ onNavigate }) {
   const { data, loading, error, refresh } = useResource('/api/dashboard')
+  /* Fetched separately: the arrears walk is the slowest query, so the KPI
+     cards above don't wait for it. */
+  const { data: arrears, loading: arrearsLoading, error: arrearsError, refresh: refreshArrears } =
+    useResource('/api/dashboard/arrears?limit=8')
   const [payFilter, setPayFilter] = useState('')
   const [renewFilter, setRenewFilter] = useState('')
 
@@ -40,41 +44,51 @@ export default function Dashboard({ onNavigate }) {
         </div>
       </div>
 
+      {s.expiredLeases > 0 && (
+        <div className="error-banner is-retryable" role="status">
+          <span>
+            {s.expiredLeases} lease{s.expiredLeases > 1 ? 's have' : ' has'} passed its end date
+            but is still marked active. Renew or vacate {s.expiredLeases > 1 ? 'them' : 'it'} so
+            expected rent stays accurate.
+          </span>
+          <button className="btn" onClick={() => onNavigate('leases')}>Review leases</button>
+        </div>
+      )}
+
       {/* Six fixed cards, always present, so the row is a clean matrix rather
-          than an auto-fit grid that strands the last card on its own line. */}
+          than an auto-fit grid that strands the last card on its own line.
+          Each one opens the app that explains the number. */}
       <div className="stats kpi">
-        <div className="stat">
+        <button type="button" className="stat is-clickable" onClick={() => onNavigate('units')}>
           <div className="label">Total units</div>
           <div className="value">{s.totalUnits}</div>
           <div className="sub">across the estate</div>
-        </div>
-        <div className="stat good">
+        </button>
+        <button type="button" className="stat is-clickable good" onClick={() => onNavigate('units', { status: 'occupied' })}>
           <div className="label">Occupied</div>
           <div className="value">{s.occupiedUnits}</div>
           <div className="sub">{s.vacantUnits} vacant</div>
-        </div>
-        <div className="stat accent">
+        </button>
+        <button type="button" className="stat is-clickable accent" onClick={() => onNavigate('leases')}>
           <div className="label">Expected rent / mo</div>
           <div className="value">{ksh(s.expectedMonthly)}</div>
           <div className="sub">from active leases</div>
-        </div>
-        <div className="stat">
+        </button>
+        <button type="button" className="stat is-clickable" onClick={() => onNavigate('payments')}>
           <div className="label">Collected</div>
           <div className="value">{ksh(s.collectedMonth)}</div>
           <div className="sub">{monthPct}% of expected</div>
-        </div>
-        <div className={s.monthOutstanding > 0 ? 'stat warn' : 'stat'}>
+        </button>
+        <button type="button" className="stat is-clickable warn" onClick={() => onNavigate('payments', { arrears: true })}>
           <div className="label">Outstanding</div>
           <div className="value">{ksh(s.monthOutstanding)}</div>
-          <div className="sub">
-            {s.monthOutstanding > 0 ? 'rent not yet paid' : 'all settled'}
-          </div>
-        </div>
-        <div className="stat caution">
+          <div className="sub">rent not yet paid this month</div>
+        </button>
+        <button type="button" className="stat is-clickable caution" onClick={() => onNavigate('utilities')}>
           <div className="label">Pending utilities</div>
           <div className="value">{ksh(s.pendingUtility)}</div>
           <div className="sub">water &amp; electricity</div>
-        </div>
+        </button>
       </div>
 
       <div className="dashboard-split">
@@ -89,7 +103,15 @@ export default function Dashboard({ onNavigate }) {
               <thead><tr><th>Date</th><th>Property</th><th>Unit</th><th>Tenant</th><th>Method</th><th className="num">Amount</th></tr></thead>
               <tbody>
                 {recentPayments.map((p) => (
-                  <tr key={p.id}>
+                  <tr
+                    key={p.id}
+                    className={p.tenant_id ? 'row-link' : undefined}
+                    title={p.tenant_name ? `Open ${p.tenant_name}'s ledger` : undefined}
+                    onClick={p.tenant_id ? () => onNavigate('payments', {
+                      tenant: p.tenant_id,
+                      tenantName: p.tenant_name
+                    }) : undefined}
+                  >
                     <td data-label="Date">{fmtDate(p.payment_date)}</td>
                     <td data-label="Property">{p.property_name}</td>
                     <td data-label="Unit">{p.unit_number}</td>
@@ -126,7 +148,12 @@ export default function Dashboard({ onNavigate }) {
               else if (known && days <= 30) { tone = 'warn'; text = `${days}d left` }
               else if (known) { tone = 'neutral'; text = `${days}d left` }
               return (
-                <div className="renewal-line" key={l.id}>
+                <div
+                  className="renewal-line row-link"
+                  key={l.id}
+                  title={`Open leases for ${l.unit_number}`}
+                  onClick={() => onNavigate('leases', { search: l.unit_number })}
+                >
                   <div style={{ flex: 1 }}>
                     <div><strong>{l.unit_number}</strong> <span className="muted">· {l.tenant_name}</span></div>
                     <div className="small muted">Ends {fmtDate(l.end_date)} · {l.property_name}</div>
@@ -138,6 +165,75 @@ export default function Dashboard({ onNavigate }) {
             })
           )}
         </div>
+      </div>
+
+      {/* Accumulated arrears: every unpaid month stays on the books, so an
+          unpaid September is still visible in October. */}
+      <div className="card">
+        <div className="card-title">
+          <h3>
+            Rent arrears{' '}
+            <span className="muted">{arrearsLoading ? '…' : `(${arrears?.count ?? 0})`}</span>
+          </h3>
+          <span className="muted small" title="Rent owed to you by these tenants">
+            {arrearsLoading ? 'Calculating…' : `Total arrears ${ksh(arrears?.total ?? 0)}`}
+          </span>
+          <button className="btn small tinted" onClick={() => onNavigate('payments')}>
+            Open ledger
+          </button>
+        </div>
+
+        {arrearsError ? (
+          <ErrorBanner error={arrearsError} onRetry={refreshArrears} busy={arrearsLoading} />
+        ) : arrearsLoading ? (
+          <p className="loading">Working out who owes…</p>
+        ) : !arrears?.tenants || arrears.tenants.length === 0 ? (
+          <p className="muted">No tenant is behind on rent.</p>
+        ) : (
+          <div className="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tenant</th><th>Unit</th><th>Property</th>
+                  <th className="num" title="Number of months this tenant did not pay in full">Months unpaid</th>
+                  <th className="num" title="Rent this tenant owes you">Owed by tenant</th>
+                </tr>
+              </thead>
+              <tbody>
+                {arrears.tenants.map((t) => (
+                  <tr
+                    key={`${t.tenant_id}-${t.unit_number}`}
+                    className="row-link"
+                    title={`Open ${t.tenant_name}'s rent ledger`}
+                    onClick={() => onNavigate('payments', {
+                      tenant: t.tenant_id,
+                      tenantName: t.tenant_name,
+                      arrears: true
+                    })}
+                  >
+                    <td data-label="Tenant">
+                      <strong>{t.tenant_name}</strong>
+                      {t.status === 'terminated' && (
+                        <span className="badge neutral" style={{ marginLeft: 8 }}>left</span>
+                      )}
+                    </td>
+                    <td data-label="Unit">{t.unit_number}</td>
+                    <td data-label="Property" className="muted">{t.property_name}</td>
+                    <td data-label="Months unpaid" className="num">
+                      <span className="badge danger">{t.months_behind}</span>
+                    </td>
+                    <td data-label="Owed by tenant" className="num"><strong>{ksh(t.outstanding)}</strong></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {arrears.count > arrears.tenants.length && (
+              <p className="muted small" style={{ marginTop: 10 }}>
+                Showing the {arrears.tenants.length} largest of {arrears.count} tenants in arrears.
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

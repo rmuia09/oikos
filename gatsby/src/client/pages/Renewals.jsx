@@ -6,6 +6,8 @@ import ConfirmDelete from '../components/ConfirmDelete.jsx'
 import Paginator, { usePagination } from '../components/Paginator.jsx'
 import RowMenu from '../components/RowMenu.jsx'
 import ErrorBanner from '../components/ErrorBanner.jsx'
+import VacateModal from '../components/VacateModal.jsx'
+import NoticeToQuit from '../components/NoticeToQuit.jsx'
 
 const badgeFor = (d) => {
   if (d < 0) return <span className="badge danger">Overdue</span>
@@ -23,12 +25,13 @@ export default function Renewals() {
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   const [confirmTerminate, setConfirmTerminate] = useState(null)
+  const [noticeFor, setNoticeFor] = useState(null)
   const [confirmDel, setConfirmDel] = useState(null)
   const [adding, setAdding] = useState(false)
   const [editing, setEditing] = useState(null)
 
-  const [newLease, setNewLease] = useState({ unit_id: '', tenant_id: '', start_date: todayStr(), end_date: '', monthly_rent: '', renewal_months: 12 })
-  const [editLease, setEditLease] = useState({ start_date: '', end_date: '', monthly_rent: '', renewal_months: 12 })
+  const [newLease, setNewLease] = useState({ unit_id: '', tenant_id: '', start_date: todayStr(), end_date: '', monthly_rent: '', renewal_months: 12, deposit_amount: '', notice_period_days: '', early_termination_fee: '' })
+  const [editLease, setEditLease] = useState({ start_date: '', end_date: '', monthly_rent: '', renewal_months: 12, deposit_amount: '', notice_period_days: '', early_termination_fee: '' })
   const [filterText, setFilterText] = useState('')
   const [filterProp, setFilterProp] = useState('')
 
@@ -49,30 +52,48 @@ export default function Renewals() {
     } catch (e) { setErr(e.message) } finally { setBusy(null) }
   }
 
-  async function terminate() {
-    setBusy('terminate')
-    try {
-      await api.post(`/api/leases/${confirmTerminate.id}/terminate`, {})
-      setConfirmTerminate(null)
-      refresh()
-      setMsg(`${confirmTerminate.unit_number} lease ended, unit marked vacant`)
-    } catch (e) { setErr(e.message) } finally { setBusy(null) }
+  /* Terminating from here goes through the same settlement flow as the Units
+     page, so the exit type and final account are always captured. */
+  function openTerminate(l) {
+    setConfirmTerminate({
+      id: l.unit_id,
+      unit_number: l.unit_number,
+      property_name: l.property_name,
+      tenant_name: l.tenant_name,
+      lease_end: l.end_date,
+      deposit_amount: l.deposit_amount,
+      early_termination_fee: l.early_termination_fee,
+      notice_period_days: l.notice_period_days
+    })
   }
 
   async function createLease(e) {
     e.preventDefault()
     setErr('')
     try {
-      const r = await api.post('/api/leases', { ...newLease, monthly_rent: Number(newLease.monthly_rent) })
+      const payload = { ...newLease, monthly_rent: Number(newLease.monthly_rent) }
+      /* Blank exit fields fall back to the estate policy on the server. */
+      if (newLease.deposit_amount !== '') payload.deposit_amount = Number(newLease.deposit_amount)
+      if (newLease.notice_period_days !== '') payload.notice_period_days = Number(newLease.notice_period_days)
+      if (newLease.early_termination_fee !== '') payload.early_termination_fee = Number(newLease.early_termination_fee)
+      await api.post('/api/leases', payload)
       setAdding(false)
       refresh()
       setMsg(`New tenancy created for unit ${newLease.unit_id ? units.find((u) => u.id === Number(newLease.unit_id)).unit_number : ''}`)
-      setNewLease({ unit_id: '', tenant_id: '', start_date: todayStr(), end_date: '', monthly_rent: '', renewal_months: 12 })
+      setNewLease({ unit_id: '', tenant_id: '', start_date: todayStr(), end_date: '', monthly_rent: '', renewal_months: 12, deposit_amount: '', notice_period_days: '', early_termination_fee: '' })
     } catch (x) { setErr(x.message) }
   }
 
   function openEdit(l) {
-    setEditLease({ start_date: l.start_date, end_date: l.end_date, monthly_rent: l.monthly_rent, renewal_months: l.renewal_months || 12 })
+    setEditLease({
+      start_date: l.start_date,
+      end_date: l.end_date,
+      monthly_rent: l.monthly_rent,
+      renewal_months: l.renewal_months || 12,
+      deposit_amount: l.deposit_amount ?? '',
+      notice_period_days: l.notice_period_days ?? '',
+      early_termination_fee: l.early_termination_fee ?? ''
+    })
     setEditing(l)
   }
 
@@ -80,7 +101,14 @@ export default function Renewals() {
     e.preventDefault()
     setErr('')
     try {
-      await api.patch(`/api/leases/${editing.id}`, { ...editLease, monthly_rent: Number(editLease.monthly_rent), renewal_months: Number(editLease.renewal_months) })
+      await api.patch(`/api/leases/${editing.id}`, {
+        ...editLease,
+        monthly_rent: Number(editLease.monthly_rent),
+        renewal_months: Number(editLease.renewal_months),
+        deposit_amount: Number(editLease.deposit_amount || 0),
+        notice_period_days: Number(editLease.notice_period_days || 0),
+        early_termination_fee: Number(editLease.early_termination_fee || 0)
+      })
       setEditing(null)
       refresh()
       setMsg(`Lease for ${editing.unit_number} updated`)
@@ -140,13 +168,13 @@ export default function Renewals() {
           {overdue.length > 0 && (
             <div className="card">
               <h3 style={{ color: 'var(--danger)' }}>Overdue renewals</h3>
-              <RenewalTable rows={overdue} busy={busy} onNotice={sendNotice} onRenew={renew} onEdit={openEdit} onTerminate={setConfirmTerminate} onDelete={setConfirmDel} />
+              <RenewalTable rows={overdue} busy={busy} onNotice={sendNotice} onRenew={renew} onEdit={openEdit} onTerminate={openTerminate} onDelete={setConfirmDel} onNoticeQuit={setNoticeFor} />
             </div>
           )}
 
           <div className="card">
             <h3>Due within 60 days</h3>
-            <RenewalTable rows={due} busy={busy} onNotice={sendNotice} onRenew={renew} onEdit={openEdit} onTerminate={setConfirmTerminate} onDelete={setConfirmDel} />
+            <RenewalTable rows={due} busy={busy} onNotice={sendNotice} onRenew={renew} onEdit={openEdit} onTerminate={openTerminate} onDelete={setConfirmDel} onNoticeQuit={setNoticeFor} />
           </div>
 
           <div className="card">
@@ -160,7 +188,7 @@ export default function Renewals() {
                 </thead>
                 <tbody>
                   {laterItems.map((l) => (
-                    <LeaseRow key={l.id} l={l} busy={busy} onNotice={sendNotice} onEdit={openEdit} onDelete={setConfirmDel} showRenew={false} badgeFor={badgeFor} ksh={ksh} fmtDate={fmtDate} />
+                    <LeaseRow key={l.id} l={l} busy={busy} onNotice={sendNotice} onEdit={openEdit} onDelete={setConfirmDel} onNoticeQuit={setNoticeFor} showRenew={false} badgeFor={badgeFor} ksh={ksh} fmtDate={fmtDate} />
                   ))}
                   {laterItems.length === 0 && <tr><td data-label="Property" colSpan="10" className="muted">No other active leases.</td></tr>}
                 </tbody>
@@ -207,6 +235,18 @@ export default function Renewals() {
                 <label>Monthly rent (KES) *</label>
                 <input type="number" min="0" value={newLease.monthly_rent} onChange={(e) => setNewLease({ ...newLease, monthly_rent: e.target.value })} required />
               </div>
+              <div className="field">
+                <label>Deposit (KES)</label>
+                <input type="number" min="0" value={newLease.deposit_amount} onChange={(e) => setNewLease({ ...newLease, deposit_amount: e.target.value })} placeholder="Estate default" />
+              </div>
+              <div className="field">
+                <label>Notice period (days)</label>
+                <input type="number" min="0" value={newLease.notice_period_days} onChange={(e) => setNewLease({ ...newLease, notice_period_days: e.target.value })} placeholder="Estate default" />
+              </div>
+              <div className="field">
+                <label>Early-termination charge (KES)</label>
+                <input type="number" min="0" value={newLease.early_termination_fee} onChange={(e) => setNewLease({ ...newLease, early_termination_fee: e.target.value })} placeholder="Estate default" />
+              </div>
             </div>
             <div className="modal-foot" style={{ padding: '16px 0 0', border: 0, background: 'transparent' }}>
               <button type="button" className="btn secondary" onClick={() => setAdding(false)}>Cancel</button>
@@ -233,6 +273,18 @@ export default function Renewals() {
                 <label>Monthly rent (KES)</label>
                 <input type="number" min="0" value={editLease.monthly_rent} onChange={(e) => setEditLease({ ...editLease, monthly_rent: e.target.value })} />
               </div>
+              <div className="field">
+                <label>Deposit (KES)</label>
+                <input type="number" min="0" value={editLease.deposit_amount} onChange={(e) => setEditLease({ ...editLease, deposit_amount: e.target.value })} />
+              </div>
+              <div className="field">
+                <label>Notice period (days)</label>
+                <input type="number" min="0" value={editLease.notice_period_days} onChange={(e) => setEditLease({ ...editLease, notice_period_days: e.target.value })} />
+              </div>
+              <div className="field">
+                <label>Early-termination charge (KES)</label>
+                <input type="number" min="0" value={editLease.early_termination_fee} onChange={(e) => setEditLease({ ...editLease, early_termination_fee: e.target.value })} />
+              </div>
             </div>
             <div className="modal-foot" style={{ padding: '16px 0 0', border: 0, background: 'transparent' }}>
               <button type="button" className="btn secondary" onClick={() => setEditing(null)}>Cancel</button>
@@ -243,13 +295,19 @@ export default function Renewals() {
       )}
 
       {confirmTerminate && (
-        <Modal title="Terminate lease" onClose={() => setConfirmTerminate(null)}>
-          <p>End the lease for <strong>{confirmTerminate.unit_number}</strong> ({confirmTerminate.tenant_name})? The unit will be marked <strong>vacant</strong>.</p>
-          <div className="modal-foot" style={{ padding: '16px 0 0', border: 0, background: 'transparent' }}>
-            <button className="btn secondary" onClick={() => setConfirmTerminate(null)}>Cancel</button>
-            <button className="btn danger" onClick={terminate} disabled={busy === 'terminate'}>Terminate</button>
-          </div>
-        </Modal>
+        <VacateModal
+          unit={confirmTerminate}
+          onClose={() => setConfirmTerminate(null)}
+          onDone={() => {
+            setMsg(`Unit ${confirmTerminate.unit_number} marked vacant and its lease ended`)
+            setConfirmTerminate(null)
+            refresh()
+          }}
+        />
+      )}
+
+      {noticeFor && (
+        <NoticeToQuit lease={noticeFor} onClose={() => setNoticeFor(null)} />
       )}
 
       {confirmDel && (
@@ -264,7 +322,7 @@ export default function Renewals() {
   )
 }
 
-function LeaseRow({ l, busy, onNotice, onEdit, onDelete, showRenew = true, onRenew }) {
+function LeaseRow({ l, busy, onNotice, onEdit, onDelete, onNoticeQuit, showRenew = true, onRenew }) {
   return (
     <tr>
       <td>{l.property_name}</td><td><strong>{l.unit_number}</strong></td>
@@ -277,6 +335,7 @@ function LeaseRow({ l, busy, onNotice, onEdit, onDelete, showRenew = true, onRen
       <td className="row-actions">
         <RowMenu label={`Actions for ${l.unit_number}`} items={[
           !l.notice_sent && { label: 'Send notice', icon: '🔔', disabled: busy === 'notice' + l.id, onClick: () => onNotice(l) },
+          { label: 'Notice to quit', icon: '📄', onClick: () => onNoticeQuit(l) },
           { label: 'Edit', icon: '✏️', onClick: () => onEdit(l) },
           showRenew && { label: 'Renew +10%', icon: '🔄', disabled: busy === 'renew' + l.id, onClick: () => onRenew(l) },
           { label: 'Delete', icon: '🗑', tone: 'danger', onClick: () => onDelete(l) }
@@ -286,7 +345,7 @@ function LeaseRow({ l, busy, onNotice, onEdit, onDelete, showRenew = true, onRen
   )
 }
 
-function RenewalTable({ rows, busy, onNotice, onRenew, onEdit, onTerminate, onDelete }) {
+function RenewalTable({ rows, busy, onNotice, onRenew, onEdit, onTerminate, onDelete, onNoticeQuit }) {
   if (rows.length === 0) return <p className="muted">None.</p>
   return (
     <div className="tbl-wrap">
@@ -308,6 +367,7 @@ function RenewalTable({ rows, busy, onNotice, onRenew, onEdit, onTerminate, onDe
               <td data-label="" className="row-actions">
                 <RowMenu label={`Actions for ${l.unit_number}`} items={[
                   !l.notice_sent && { label: 'Send notice', icon: '🔔', disabled: busy === 'notice' + l.id, onClick: () => onNotice(l) },
+                  { label: 'Notice to quit', icon: '📄', onClick: () => onNoticeQuit(l) },
                   { label: 'Edit', icon: '✏️', onClick: () => onEdit(l) },
                   { label: 'Renew +10%', icon: '🔄', disabled: busy === 'renew' + l.id, onClick: () => onRenew(l) },
                   { label: 'End lease', icon: '⏹', tone: 'warn', onClick: () => onTerminate(l) },

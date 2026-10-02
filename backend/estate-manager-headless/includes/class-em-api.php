@@ -50,6 +50,8 @@ class EM_API {
 
 		/* ---------- Dashboard + reports ---------- */
 		self::route( '/dashboard', 'GET', 'dashboard', $std );
+		/* The heavy arrears walk, kept off the main dashboard request. */
+		self::route( '/dashboard/arrears', 'GET', 'dashboard_arrears', $std );
 		self::route( '/reports/summary', 'GET', 'reports_summary', $std );
 		self::route( '/reports/period', 'GET', 'reports_period', $std );
 		self::route( '/reports/rent-ledger', 'GET', 'reports_ledger', $std );
@@ -78,6 +80,8 @@ class EM_API {
 
 		/* ---------- Leases ---------- */
 		self::route( '/leases', 'GET', 'leases_list', $std );
+		/* Full lease history across years — active, renewed, terminated, expired. */
+		self::route( '/leases/history', 'GET', 'leases_history', $std );
 		self::route( '/leases', 'POST', 'leases_create', $std );
 		self::route( '/leases/(?P<id>\d+)', 'PATCH', 'leases_update', $std );
 		self::route( '/leases/(?P<id>\d+)', 'DELETE', 'leases_delete', $std );
@@ -548,6 +552,63 @@ class EM_API {
 		return null;
 	}
 
+	/* ---------------- Lease exit terms & settlement ---------------- */
+
+	/**
+	 * Resolve deposit / notice / early-termination terms for a lease.
+	 * Explicit request values win; otherwise the estate policy defaults apply.
+	 */
+	private static function lease_terms_from_request( WP_REST_Request $r, $rent ) {
+		$deposit_months = (float) EM_Settings::get( 'default_deposit_months', 1 );
+		$notice_default = (int) EM_Settings::get( 'default_notice_period_days', 30 );
+		$fee_months     = (float) EM_Settings::get( 'default_early_termination_fee_months', 0 );
+
+		$deposit = null !== $r->get_param( 'deposit_amount' )
+			? max( 0, (float) $r->get_param( 'deposit_amount' ) )
+			: round( (float) $rent * $deposit_months, 2 );
+
+		$notice = null !== $r->get_param( 'notice_period_days' )
+			? max( 0, (int) $r->get_param( 'notice_period_days' ) )
+			: max( 0, $notice_default );
+
+		$fee = null !== $r->get_param( 'early_termination_fee' )
+			? max( 0, (float) $r->get_param( 'early_termination_fee' ) )
+			: round( (float) $rent * $fee_months, 2 );
+
+		return array( 'deposit' => $deposit, 'notice_days' => $notice, 'fee' => $fee );
+	}
+
+	/** Whitelist a vacate reason category. */
+	private static function vacate_type( $type ) {
+		$allowed = array( 'expired', 'early_termination', 'eviction', 'mutual' );
+		return in_array( $type, $allowed, true ) ? $type : 'expired';
+	}
+
+	/**
+	 * Work out the final account when a lease ends.
+	 *
+	 * The early-termination charge applies only when the tenant ends the lease
+	 * before its term — an expired or mutually surrendered lease pays nothing.
+	 * A positive refund is owed back to the tenant; a negative one is a balance
+	 * the tenant still owes.
+	 *
+	 * @return array{deposit:float,fee:float,deductions:float,refund:float}
+	 */
+	private static function compute_settlement( $lease, $vacate_type, $deductions ) {
+		$deposit = (float) ( $lease['deposit_amount'] ?? 0 );
+		$fee     = ( 'early_termination' === $vacate_type )
+			? (float) ( $lease['early_termination_fee'] ?? 0 )
+			: 0.0;
+		$deduct  = max( 0, (float) $deductions );
+
+		return array(
+			'deposit'    => round( $deposit, 2 ),
+			'fee'        => round( $fee, 2 ),
+			'deductions' => round( $deduct, 2 ),
+			'refund'     => round( $deposit - $fee - $deduct, 2 ),
+		);
+	}
+
 	/** Where the Gatsby app lives, so emailed links land somewhere real. */
 	private static function app_base_url() {
 		/* Setting first, then the legacy WP option, then WordPress' own URL.
@@ -687,12 +748,28 @@ class EM_API {
 			'totalUnits'       => $s['total_units'],
 			'occupiedUnits'    => $s['occupied_units'],
 			'vacantUnits'      => $s['vacant_units'],
+			'expiredLeases'    => (int) $s['expired_leases'],
 			'expectedMonthly'  => (float) $s['expected_monthly'],
 			'collectedMonth'   => (float) $s['collected_month'],
 			'monthOutstanding' => (float) $s['month_outstanding'],
 			'pendingUtility'   => (float) $s['pending_utility'],
 			'recentPayments'   => $s['recent_payments'],
 			'expiringSoon'     => $s['expiring_soon'],
+		);
+	}
+
+	/**
+	 * Who owes rent, accumulated month by month. Split out from /dashboard so
+	 * the KPI cards render immediately while this runs.
+	 */
+	public static function dashboard_arrears( WP_REST_Request $r ) {
+		$limit = (int) $r->get_param( 'limit', 8 );
+		$limit = max( 1, min( 50, $limit ) );
+		$a     = EM_Reports::arrears();
+		return array(
+			'total'   => $a['total'],
+			'count'   => $a['count'],
+			'tenants' => array_slice( $a['tenants'], 0, $limit ),
 		);
 	}
 
@@ -791,7 +868,15 @@ class EM_API {
 				(SELECT l.end_date FROM " . EM_DB::table( 'leases' ) . " l
 				  WHERE l.unit_id = u.id AND l.status = 'active' LIMIT 1) AS lease_end,
 				(SELECT l.tenant_id FROM " . EM_DB::table( 'leases' ) . " l
-				  WHERE l.unit_id = u.id AND l.status = 'active' LIMIT 1) AS tenant_id
+				  WHERE l.unit_id = u.id AND l.status = 'active' LIMIT 1) AS tenant_id,
+				(SELECT l.id FROM " . EM_DB::table( 'leases' ) . " l
+				  WHERE l.unit_id = u.id AND l.status = 'active' LIMIT 1) AS lease_id,
+				(SELECT l.deposit_amount FROM " . EM_DB::table( 'leases' ) . " l
+				  WHERE l.unit_id = u.id AND l.status = 'active' LIMIT 1) AS deposit_amount,
+				(SELECT l.early_termination_fee FROM " . EM_DB::table( 'leases' ) . " l
+				  WHERE l.unit_id = u.id AND l.status = 'active' LIMIT 1) AS early_termination_fee,
+				(SELECT l.notice_period_days FROM " . EM_DB::table( 'leases' ) . " l
+				  WHERE l.unit_id = u.id AND l.status = 'active' LIMIT 1) AS notice_period_days
 			FROM " . EM_DB::table( 'units' ) . " u
 			JOIN " . EM_DB::table( 'properties' ) . " p ON p.id = u.property_id
 			ORDER BY p.name, u.unit_number", ARRAY_A );
@@ -864,14 +949,73 @@ class EM_API {
 		if ( ! $unit ) {
 			return self::err( 'Unit not found.', 404 );
 		}
-		$active = $wpdb->get_results( $wpdb->prepare( 'SELECT id FROM ' . EM_DB::table( 'leases' ) . " WHERE unit_id = %d AND status = 'active'", $id ), ARRAY_A );
-		foreach ( (array) $active as $l ) {
-			$wpdb->update( EM_DB::table( 'leases' ), array( 'status' => 'terminated' ), array( 'id' => $l['id'] ) );
-			EM_DB::log( 'terminate', 'lease', (int) $l['id'], $reason, 'unit ' . $unit['unit_number'] );
+
+		$vacate_type = self::vacate_type( (string) $r->get_param( 'vacate_type' ) );
+		$effective   = (string) ( $r->get_param( 'effective_date' ) ?: current_time( 'Y-m-d' ) );
+		$deductions  = (float) $r->get_param( 'deductions', 0 );
+		$notes       = (string) ( $r->get_param( 'notes' ) ?? '' );
+
+		/* Enforce the notice policy: ending an unexpired lease without notice
+		   requires an explicit, auditable override. */
+		$enforce       = '1' === (string) EM_Settings::get( 'require_notice_before_vacate', '1' );
+		$override      = ! empty( $r->get_param( 'override' ) );
+		$notice_served = ! empty( $r->get_param( 'notice_served' ) );
+		if ( 'early_termination' === $vacate_type && $enforce && ! $override && ! $notice_served ) {
+			return self::err(
+				'This lease has not reached its end date. Confirm that notice was served, or explicitly override to terminate early.',
+				409
+			);
 		}
+
+		$active = $wpdb->get_results( $wpdb->prepare(
+			'SELECT * FROM ' . EM_DB::table( 'leases' ) . " WHERE unit_id = %d AND status = 'active'",
+			$id
+		), ARRAY_A );
+		$active = (array) $active;
+
+		$settlements = array();
+		foreach ( $active as $lease ) {
+			$s = self::compute_settlement( $lease, $vacate_type, $deductions );
+
+			$wpdb->update( EM_DB::table( 'leases' ), array(
+				'status'                => 'terminated',
+				'vacate_type'           => $vacate_type,
+				'vacated_at'            => $effective,
+				'settlement_fee'        => $s['fee'],
+				'settlement_deductions' => $s['deductions'],
+				'settlement_refund'     => $s['refund'],
+				'settlement_notes'      => $notes,
+			), array( 'id' => $lease['id'] ) );
+
+			EM_DB::log(
+				'terminate',
+				'lease',
+				(int) $lease['id'],
+				$reason,
+				sprintf(
+					'unit %s · %s · deposit %s, fee %s, deductions %s, %s %s',
+					$unit['unit_number'],
+					$vacate_type,
+					number_format( $s['deposit'], 2 ),
+					number_format( $s['fee'], 2 ),
+					number_format( $s['deductions'], 2 ),
+					$s['refund'] >= 0 ? 'refund' : 'balance due',
+					number_format( abs( $s['refund'] ), 2 )
+				)
+			);
+
+			$settlements[] = array_merge( array( 'lease_id' => (int) $lease['id'] ), $s );
+		}
+
 		$wpdb->update( EM_DB::table( 'units' ), array( 'status' => 'vacant' ), array( 'id' => $id ) );
 		EM_DB::log( 'vacate', 'unit', $id, $reason, $unit['unit_number'] . ( $active ? ' · ' . count( $active ) . ' lease(s) ended' : '' ) );
-		return array( 'leases_ended' => count( $active ), 'unit_number' => $unit['unit_number'] );
+
+		return array(
+			'leases_ended' => count( $active ),
+			'unit_number'  => $unit['unit_number'],
+			'vacate_type'  => $vacate_type,
+			'settlements'  => $settlements,
+		);
 	}
 
 	/* ---------------- Tenants ---------------- */
@@ -998,16 +1142,21 @@ class EM_API {
 		$start     = strtotime( $start_date );
 		$end       = EM_Helpers::add_months( $start, $months );
 
+		$terms = self::lease_terms_from_request( $r, $rent );
+
 		$wpdb->insert( EM_DB::table( 'leases' ), array(
-			'unit_id'        => $unit['id'],
-			'tenant_id'      => $tenant_id,
-			'start_date'     => date( 'Y-m-d', $start ),
-			'end_date'       => date( 'Y-m-d', $end ),
-			'monthly_rent'   => $rent,
-			'renewal_months' => $renew,
-			'status'         => 'active',
-			'notice_sent'    => 0,
-			'created_at'     => current_time( 'mysql' ),
+			'unit_id'               => $unit['id'],
+			'tenant_id'             => $tenant_id,
+			'start_date'            => date( 'Y-m-d', $start ),
+			'end_date'              => date( 'Y-m-d', $end ),
+			'monthly_rent'          => $rent,
+			'renewal_months'        => $renew,
+			'deposit_amount'        => $terms['deposit'],
+			'notice_period_days'    => $terms['notice_days'],
+			'early_termination_fee' => $terms['fee'],
+			'status'                => 'active',
+			'notice_sent'           => 0,
+			'created_at'            => current_time( 'mysql' ),
 		) );
 		$lease_id = (int) $wpdb->insert_id;
 
@@ -1049,6 +1198,57 @@ class EM_API {
 		return $rows;
 	}
 
+	/**
+	 * Every lease on record, across all years — the estate's lease history.
+	 * Filters: year, property_id, status.
+	 */
+	public static function leases_history( WP_REST_Request $r ) {
+		global $wpdb;
+		$year        = (int) $r->get_param( 'year', 0 );
+		$property_id = (int) $r->get_param( 'property_id', 0 );
+		$status      = trim( (string) $r->get_param( 'status', '' ) );
+
+		$sql    = "SELECT l.*, u.unit_number, u.property_id, pr.name AS property_name, t.name AS tenant_name, t.phone
+			 FROM " . EM_DB::table( 'leases' ) . " l
+			 JOIN " . EM_DB::table( 'units' ) . " u ON u.id = l.unit_id
+			 JOIN " . EM_DB::table( 'properties' ) . " pr ON pr.id = u.property_id
+			 JOIN " . EM_DB::table( 'tenants' ) . " t ON t.id = l.tenant_id
+			 WHERE 1=1";
+		$params = array();
+
+		if ( $year ) {
+			$sql      .= ' AND (YEAR(l.start_date) = %d OR YEAR(l.end_date) = %d)';
+			$params[] = $year;
+			$params[] = $year;
+		}
+		if ( $property_id ) {
+			$sql      .= ' AND u.property_id = %d';
+			$params[] = $property_id;
+		}
+		if ( '' !== $status ) {
+			$sql      .= ' AND l.status = %s';
+			$params[] = $status;
+		}
+		$sql .= ' ORDER BY u.property_id, u.unit_number, l.start_date DESC';
+
+		$rows = $params
+			? $wpdb->get_results( $wpdb->prepare( $sql, $params ), ARRAY_A )
+			: $wpdb->get_results( $sql, ARRAY_A );
+
+		$today = current_time( 'Y-m-d' );
+		$rows  = (array) $rows;
+		foreach ( $rows as &$l ) {
+			/* A lease past its end date reads as expired even though its
+			   stored status is still 'active' until someone acts on it. */
+			$l['effective_status'] = ( 'active' === $l['status'] && $l['end_date'] < $today )
+				? 'expired'
+				: $l['status'];
+			$l['days_left'] = EM_Helpers::days_left( $l['end_date'] );
+		}
+		unset( $l );
+		return $rows;
+	}
+
 	public static function leases_create( WP_REST_Request $r ) {
 		global $wpdb;
 		$unit_id   = (int) $r->get_param( 'unit_id' );
@@ -1063,16 +1263,24 @@ class EM_API {
 		if ( EM_DB::unit_has_active_lease( $unit_id ) ) {
 			return self::err( 'Unit already has an active lease.' );
 		}
+
+		/* Deposit, notice and early-termination terms default from the estate
+		   policy but can be overridden per lease. */
+		$terms = self::lease_terms_from_request( $r, $rent );
+
 		$wpdb->insert( EM_DB::table( 'leases' ), array(
-			'unit_id'        => $unit_id,
-			'tenant_id'      => $tenant_id,
-			'start_date'     => $start,
-			'end_date'       => $end,
-			'monthly_rent'   => $rent,
-			'renewal_months' => $renew,
-			'status'         => 'active',
-			'notice_sent'    => 0,
-			'created_at'     => current_time( 'mysql' ),
+			'unit_id'               => $unit_id,
+			'tenant_id'             => $tenant_id,
+			'start_date'            => $start,
+			'end_date'              => $end,
+			'monthly_rent'          => $rent,
+			'renewal_months'        => $renew,
+			'deposit_amount'        => $terms['deposit'],
+			'notice_period_days'    => $terms['notice_days'],
+			'early_termination_fee' => $terms['fee'],
+			'status'                => 'active',
+			'notice_sent'           => 0,
+			'created_at'            => current_time( 'mysql' ),
 		) );
 		$id = (int) $wpdb->insert_id;
 		$wpdb->update( EM_DB::table( 'units' ), array( 'status' => 'occupied', 'monthly_rent' => $rent ), array( 'id' => $unit_id ) );
@@ -1095,6 +1303,17 @@ class EM_API {
 		$lease = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . EM_DB::table( 'leases' ) . ' WHERE id = %d', $id ), ARRAY_A );
 		if ( ! $lease ) {
 			return self::err( 'Lease not found.', 404 );
+		}
+
+		/* Exit terms are optional on edit — omit them to keep what's there. */
+		if ( null !== $r->get_param( 'deposit_amount' ) ) {
+			$data['deposit_amount'] = max( 0, (float) $r->get_param( 'deposit_amount' ) );
+		}
+		if ( null !== $r->get_param( 'notice_period_days' ) ) {
+			$data['notice_period_days'] = max( 0, (int) $r->get_param( 'notice_period_days' ) );
+		}
+		if ( null !== $r->get_param( 'early_termination_fee' ) ) {
+			$data['early_termination_fee'] = max( 0, (float) $r->get_param( 'early_termination_fee' ) );
 		}
 		$wpdb->update( EM_DB::table( 'leases' ), $data, array( 'id' => $id ) );
 		$wpdb->update( EM_DB::table( 'units' ), array( 'monthly_rent' => $data['monthly_rent'] ), array( 'id' => $lease['unit_id'] ) );
@@ -1135,15 +1354,20 @@ class EM_API {
 		$new_rent     = round( (float) $lease['monthly_rent'] * 1.1, 2 );
 
 		$wpdb->insert( EM_DB::table( 'leases' ), array(
-			'unit_id'        => $lease['unit_id'],
-			'tenant_id'      => $lease['tenant_id'],
-			'start_date'     => date( 'Y-m-d', $start ),
-			'end_date'       => date( 'Y-m-d', $end ),
-			'monthly_rent'   => $new_rent,
-			'renewal_months' => $renew_months,
-			'status'         => 'active',
-			'notice_sent'    => 0,
-			'created_at'     => current_time( 'mysql' ),
+			'unit_id'               => $lease['unit_id'],
+			'tenant_id'             => $lease['tenant_id'],
+			'start_date'            => date( 'Y-m-d', $start ),
+			'end_date'              => date( 'Y-m-d', $end ),
+			'monthly_rent'          => $new_rent,
+			'renewal_months'        => $renew_months,
+			/* Carry the exit terms forward, or a renewal silently drops the
+			   tenant's deposit and notice period. */
+			'deposit_amount'        => (float) ( $lease['deposit_amount'] ?? 0 ),
+			'notice_period_days'    => (int) ( $lease['notice_period_days'] ?? 30 ),
+			'early_termination_fee' => (float) ( $lease['early_termination_fee'] ?? 0 ),
+			'status'                => 'active',
+			'notice_sent'           => 0,
+			'created_at'            => current_time( 'mysql' ),
 		) );
 		$new_id = (int) $wpdb->insert_id;
 
@@ -1168,10 +1392,53 @@ class EM_API {
 			return self::err( 'Active lease not found.', 404 );
 		}
 		$reason = trim( (string) ( $r->get_param( 'reason' ) ?? 'Terminated lease' ) );
-		$wpdb->update( EM_DB::table( 'leases' ), array( 'status' => 'terminated' ), array( 'id' => $id ) );
+
+		$vacate_type = self::vacate_type( (string) $r->get_param( 'vacate_type' ) );
+		$effective   = (string) ( $r->get_param( 'effective_date' ) ?: current_time( 'Y-m-d' ) );
+		$deductions  = (float) $r->get_param( 'deductions', 0 );
+		$notes       = (string) ( $r->get_param( 'notes' ) ?? '' );
+
+		$enforce = '1' === (string) EM_Settings::get( 'require_notice_before_vacate', '1' );
+		if ( 'early_termination' === $vacate_type && $enforce
+			&& empty( $r->get_param( 'override' ) ) && empty( $r->get_param( 'notice_served' ) ) ) {
+			return self::err(
+				'This lease has not reached its end date. Confirm that notice was served, or explicitly override to terminate early.',
+				409
+			);
+		}
+
+		$s = self::compute_settlement( $lease, $vacate_type, $deductions );
+
+		$wpdb->update( EM_DB::table( 'leases' ), array(
+			'status'                => 'terminated',
+			'vacate_type'           => $vacate_type,
+			'vacated_at'            => $effective,
+			'settlement_fee'        => $s['fee'],
+			'settlement_deductions' => $s['deductions'],
+			'settlement_refund'     => $s['refund'],
+			'settlement_notes'      => $notes,
+		), array( 'id' => $id ) );
+
 		$wpdb->update( EM_DB::table( 'units' ), array( 'status' => 'vacant' ), array( 'id' => $lease['unit_id'] ) );
-		EM_DB::log( 'terminate', 'lease', $id, $reason, 'unit ' . $lease['unit_id'] );
-		return array( 'ok' => true );
+
+		EM_DB::log(
+			'terminate',
+			'lease',
+			$id,
+			$reason,
+			sprintf(
+				'unit %d · %s · deposit %s, fee %s, deductions %s, %s %s',
+				$lease['unit_id'],
+				$vacate_type,
+				number_format( $s['deposit'], 2 ),
+				number_format( $s['fee'], 2 ),
+				number_format( $s['deductions'], 2 ),
+				$s['refund'] >= 0 ? 'refund' : 'balance due',
+				number_format( abs( $s['refund'] ), 2 )
+			)
+		);
+
+		return array( 'ok' => true, 'settlement' => $s );
 	}
 
 	public static function leases_notice( WP_REST_Request $r ) {
@@ -1480,6 +1747,12 @@ class EM_API {
 			'renewal_reminder_months' => (int) EM_Settings::get( 'renewal_reminder_months', 2 ),
 			'phone_country_code'      => (string) EM_Settings::get( 'phone_country_code', '254' ),
 			'rates'                   => EM_Settings::utility_rates(),
+			'tenancy'                 => array(
+				'default_notice_period_days'           => (int) EM_Settings::get( 'default_notice_period_days', 30 ),
+				'default_deposit_months'               => (float) EM_Settings::get( 'default_deposit_months', 1 ),
+				'default_early_termination_fee_months' => (float) EM_Settings::get( 'default_early_termination_fee_months', 0 ),
+				'require_notice_before_vacate'         => '1' === (string) EM_Settings::get( 'require_notice_before_vacate', '1' ),
+			),
 			'sms'                     => EM_Settings::masked( 'sms' ),
 			'email'                   => EM_Settings::masked( 'email' ),
 		);
@@ -1495,6 +1768,14 @@ class EM_API {
 			EM_Settings::set( 'phone_country_code', '' !== $cc ? $cc : '254' );
 		}
 
+		if ( isset( $json['tenancy'] ) && is_array( $json['tenancy'] ) ) {
+			$t = $json['tenancy'];
+			EM_Settings::set( 'default_notice_period_days', max( 0, (int) ( $t['default_notice_period_days'] ?? 30 ) ) );
+			EM_Settings::set( 'default_deposit_months', max( 0, (float) ( $t['default_deposit_months'] ?? 1 ) ) );
+			EM_Settings::set( 'default_early_termination_fee_months', max( 0, (float) ( $t['default_early_termination_fee_months'] ?? 0 ) ) );
+			EM_Settings::set( 'require_notice_before_vacate', ! empty( $t['require_notice_before_vacate'] ) ? '1' : '0' );
+		}
+
 		if ( isset( $json['rates'] ) && is_array( $json['rates'] ) ) {
 			EM_Settings::set( 'water', max( 0, (float) ( $json['rates']['water'] ?? 0 ) ) );
 			EM_Settings::set( 'electricity', max( 0, (float) ( $json['rates']['electricity'] ?? 0 ) ) );
@@ -1502,10 +1783,19 @@ class EM_API {
 
 		if ( isset( $json['sms'] ) && is_array( $json['sms'] ) ) {
 			$sms = $json['sms'];
+			$providers = array( 'africas_talking', 'sms_gate', 'textbee', 'generic' );
+			$provider  = (string) ( $sms['provider'] ?? 'africas_talking' );
+
 			EM_Settings::set( 'sms_enabled', ! empty( $sms['enabled'] ) ? '1' : '0' );
+			EM_Settings::set( 'sms_provider', in_array( $provider, $providers, true ) ? $provider : 'africas_talking' );
 			EM_Settings::set( 'sms_username', (string) ( $sms['username'] ?? '' ) );
 			EM_Settings::set( 'sms_from', (string) ( $sms['from'] ?? '' ) );
 			EM_Settings::set( 'sms_sandbox', ! empty( $sms['sandbox'] ) ? '1' : '0' );
+			EM_Settings::set( 'sms_device_id', (string) ( $sms['device_id'] ?? '' ) );
+			EM_Settings::set( 'sms_base_url', esc_url_raw( (string) ( $sms['base_url'] ?? '' ) ) );
+			EM_Settings::set( 'sms_generic_url', esc_url_raw( (string) ( $sms['generic_url'] ?? '' ) ) );
+			EM_Settings::set( 'sms_generic_auth', (string) ( $sms['generic_auth'] ?? '' ) );
+			EM_Settings::set( 'sms_generic_body', (string) ( $sms['generic_body'] ?? '' ) );
 			if ( ! empty( $sms['api_key'] ) ) {
 				EM_Settings::set( 'sms_api_key', (string) $sms['api_key'] );
 			}

@@ -7,6 +7,10 @@ node_modules/
 # Logs
 *.log
 
+# Generated plugin bundles (rebuild with deploy/build-plugin.sh / the zip command)
+deploy/oikos-app/build/
+deploy/*.zip
+
 # Local env
 .env
 .env.local

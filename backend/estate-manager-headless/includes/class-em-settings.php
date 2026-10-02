@@ -43,12 +43,17 @@ class EM_Settings {
 		$s = self::all();
 		if ( 'sms' === $type ) {
 			return array(
-				'enabled'  => '1' === (string) $s['sms_enabled'],
-				'provider' => $s['sms_provider'],
-				'username' => $s['sms_username'],
-				'from'     => $s['sms_from'],
-				'sandbox'  => '1' === (string) $s['sms_sandbox'],
-				'api_key_set' => ! empty( $s['sms_api_key'] ),
+				'enabled'       => '1' === (string) $s['sms_enabled'],
+				'provider'      => $s['sms_provider'],
+				'username'      => $s['sms_username'],
+				'from'          => $s['sms_from'],
+				'sandbox'       => '1' === (string) $s['sms_sandbox'],
+				'api_key_set'   => ! empty( $s['sms_api_key'] ),
+				'device_id'     => $s['sms_device_id'] ?? '',
+				'base_url'      => $s['sms_base_url'] ?? '',
+				'generic_url'   => $s['sms_generic_url'] ?? '',
+				'generic_auth'  => $s['sms_generic_auth'] ?? '',
+				'generic_body'  => $s['sms_generic_body'] ?? '',
 			);
 		}
 		/* Where reset links point. Surfaced here because a wrong value silently

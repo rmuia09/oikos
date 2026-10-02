@@ -62,21 +62,32 @@ export default function Reports() {
   }
 
   useEffect(() => {
+    /* Compute the range first and send it on the initial load too — omitting
+       it made the first request default to a full year, which drew ~50 bars
+       that are unreadable on a phone. */
+    let f, t
     if (period === 'monthly') {
-      const toM = new Date().toISOString().slice(0, 7)
-      setTo(toM)
-      setFrom(shiftMonths(toM, -11))
+      t = new Date().toISOString().slice(0, 7)
+      f = shiftMonths(t, -11)
     } else {
       const today = new Date()
-      const toD = today.toISOString().slice(0, 10)
-      const fromD = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate() - 77)).toISOString().slice(0, 10)
-      setTo(toD)
-      setFrom(fromD)
+      t = today.toISOString().slice(0, 10)
+      f = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate() - 77)).toISOString().slice(0, 10)
     }
+    setTo(t)
+    setFrom(f)
+
     api.get('/api/properties').then(setProps).catch(() => {})
     setLoading(true)
     const p = new URLSearchParams({ period })
     if (propertyId) p.set('property_id', propertyId)
+    if (period === 'monthly') {
+      if (f) p.set('from', `${f}-01`)
+      if (t) p.set('to', monthEndStr(t))
+    } else {
+      if (f) p.set('from', f)
+      if (t) p.set('to', t)
+    }
     p.set('limit', '120')
     api.get(`/api/reports/summary?${p}`).then(setSummary).catch((x) => setErr(x.message)).finally(() => setLoading(false))
   }, [period])

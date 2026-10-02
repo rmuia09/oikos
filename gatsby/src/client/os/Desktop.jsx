@@ -49,23 +49,31 @@ export default function Desktop({ user, onLogout, children }) {
 
   /* Create a new window for an app. Reserved for the one case where a second
      copy is genuinely wanted; every navigation path goes through surfaceApp. */
-  const launch = (id) => {
+  const launch = (id, params = null) => {
     const app = appsById[id]
-    /* Chromeless apps (the dashboard) open locked to the full canvas. */
-    if (app) wm.open(app, app.chromeless ? { snap: SNAP.maximize } : undefined)
+    if (app) {
+      wm.open(app, {
+        /* Chromeless apps (the dashboard) open locked to the full canvas. */
+        snap: app.chromeless ? SNAP.maximize : undefined,
+        params
+      })
+    }
     setLauncherOpen(false)
   }
 
   /* Bring an app to the front, or open it if it isn't running. This is what
      every launcher / navigation path uses, so the same app can never be
      stacked by accident. Never minimises — that's the dock's job. */
-  const surfaceApp = (id) => {
+  const surfaceApp = (id, params = null) => {
     const wins = wm.state.windows.filter((w) => w.appId === id)
     if (!wins.length) {
-      launch(id)
+      launch(id, params)
       return
     }
     const target = wins.find((w) => !w.minimized) || wins[0]
+    /* Re-target an already-open window, so clicking a dashboard card focuses
+       the existing app and applies the new filter rather than duplicating it. */
+    if (params) wm.setParams(target.id, params)
     if (target.minimized) wm.restore(target.id)
     else wm.focus(target.id)
     setLauncherOpen(false)
@@ -234,6 +242,7 @@ export default function Desktop({ user, onLogout, children }) {
                   onNavigate={surfaceApp}
                   onLaunch={surfaceApp}
                   openExplorer={openExplorer}
+                  params={win.params}
                 />
               )}
             </AppWindow>
